@@ -1,6 +1,6 @@
 {
   "version": "1.1.0",
-  "name": "AI Proxy Gateway",
+  "name": "Replit2Api",
   "releaseDate": "2026-04-06",
   "releaseNotes": "v1.1.0 — Friend proxy retry loop (up to 3 times, auto-skip failed nodes); FriendProxyHttpError distinguishes 5xx vs network; SSE headers delayed to first chunk; token fallback estimation"
 }

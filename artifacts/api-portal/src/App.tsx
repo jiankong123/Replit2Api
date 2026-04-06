@@ -1786,7 +1786,7 @@ export default function App() {
               background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
               display: "flex", alignItems: "center", justifyContent: "center", fontSize: "19px",
             }}>⚡</div>
-            <h1 style={{ margin: 0, fontSize: "21px", fontWeight: 700, color: "#f1f5f9" }}>AI Proxy Gateway</h1>
+            <h1 style={{ margin: 0, fontSize: "21px", fontWeight: 700, color: "#f1f5f9" }}>Replit2Api</h1>
             <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "8px" }}>
               <UpdateBadge baseUrl={baseUrl} apiKey={apiKey} />
               <button onClick={() => setShowWizard(true)} style={{
