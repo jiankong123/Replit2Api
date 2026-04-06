@@ -6,8 +6,8 @@
 >
 > 一个 Replit 项目，统一接入主流 AI 服务商，提供 OpenAI 兼容接口。
 
-[![Version](https://img.shields.io/badge/version-1.0.1-6366f1?style=flat-square)](./version.json)
-[![Replit](https://img.shields.io/badge/Replit-Remix%20%26%20Deploy-f26207?style=flat-square&logo=replit)](https://replit.com)
+[![Version](https://img.shields.io/badge/version-1.0.4c-6366f1?style=flat-square)](./version.json)
+[![Replit](https://img.shields.io/badge/Replit-Remix%20now-f26207?style=flat-square&logo=replit)](https://replit.com/@Akatsukis036s/Replit-Api-Public)
 [![License](https://img.shields.io/badge/license-MIT-10b981?style=flat-square)](./LICENSE)
 
 ---
@@ -64,55 +64,25 @@ Deploy in one click via Replit **Remix**. All API keys are stored securely in Re
 
 ## 快速开始 · Quick Start
 
-### 方式一：Replit Remix（推荐）· Method 1: Replit Remix (Recommended)
-
 **中文**
 
-1. 访问已发布的实例页面，点击右上角 **Remix** 按钮
-2. Replit 自动复制完整项目到你的账户
-3. 在 **Secrets** 面板中配置以下环境变量：
+1. 点击下方链接，进入 Replit 项目页面，点击右上角 **Remix** 按钮，将完整项目复制到你的账户：
+
+   👉 **[https://replit.com/@Akatsukis036s/Replit-Api-Public](https://replit.com/@Akatsukis036s/Replit-Api-Public)**
+
+2. Remix 完成后，点击 **Run** 启动项目，等待服务器启动。
+3. 打开门户页面，按照内置的**配置助手**完成初始化（无需手动填写任何第三方 API Key）。
+4. 点击 **Publish** 发布到生产环境，将生产域名（`https://your-app.replit.app`）填入客户端的 **Base URL**。
 
 **English**
 
-1. Visit the published instance, click **Remix** in the top-right corner
-2. Replit automatically copies the full project to your account
-3. Configure the following environment variables in the **Secrets** panel:
+1. Click the link below to open the Replit project, then click **Remix** in the top-right corner to copy it to your account:
 
-```
-PROXY_API_KEY      # 你的访问密码 / Your gateway password (required)
-OPENAI_API_KEY     # OpenAI API Key（可选 / optional）
-ANTHROPIC_API_KEY  # Anthropic API Key（可选 / optional）
-GEMINI_API_KEY     # Google Gemini API Key（可选 / optional）
-OPENROUTER_API_KEY # OpenRouter API Key（可选 / optional）
-```
+   👉 **[https://replit.com/@Akatsukis036s/Replit-Api-Public](https://replit.com/@Akatsukis036s/Replit-Api-Public)**
 
-4. 点击 **Run** 启动，然后点击 **Publish** 发布到生产环境
-4. Click **Run** to start, then **Publish** to go live
-
-5. 将生产域名（`https://your-app.replit.app`）设为客户端的 **Base URL**
-5. Set the production domain (`https://your-app.replit.app`) as the **Base URL** in your client
-
----
-
-### 方式二：本地/手动部署 · Method 2: Manual Deploy
-
-```bash
-# 依赖 Node.js 18+ 和 pnpm
-# Requires Node.js 18+ and pnpm
-
-git clone https://github.com/your-username/Replit2Api.git
-cd Replit2Api
-pnpm install
-
-# 复制并填写环境变量 / Copy and fill in env vars
-cp .env.example .env
-
-# 启动 API 服务 / Start API server
-pnpm --filter @workspace/api-server run dev
-
-# 启动前端面板 / Start frontend panel
-pnpm --filter @workspace/api-portal run dev
-```
+2. After Remix, click **Run** to start the project and wait for the server to come up.
+3. Open the portal page and follow the built-in **Setup Wizard** to complete initialization — no third-party API keys required.
+4. Click **Publish** to go live. Set the production domain (`https://your-app.replit.app`) as the **Base URL** in your client.
 
 ---
 
