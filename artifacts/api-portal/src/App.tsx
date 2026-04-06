@@ -511,6 +511,28 @@ function PageStats({
 }) {
   const _ = baseUrl; // used by parent
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [envPromptCopied, setEnvPromptCopied] = useState(false);
+
+  const ENV_NODE_PROMPT =
+    `请在当前 Replit 项目中添加一个环境变量，将子节点注册为永久 ENV 节点（Publish 后不会丢失）：\n\n` +
+    `步骤 1：检查以下环境变量名，按顺序找到第一个尚未设置的空位：\n` +
+    `   FRIEND_PROXY_URL → FRIEND_PROXY_URL_2 → FRIEND_PROXY_URL_3 → … → FRIEND_PROXY_URL_20\n` +
+    `   （可在 Secrets 面板或 viewEnvVars() 中查看已占用的名称）\n\n` +
+    `步骤 2：通过 Replit Secrets 面板为该空位添加 Secret，值填写子节点 Publish 后的站点地址：\n` +
+    `   https://【填入你的子节点 Publish 后的站点】\n` +
+    `   示例：https://my-proxy.replit.app\n\n` +
+    `步骤 3：重启服务器（Shell 中执行重启，或点击 Replit Run 按钮）\n\n` +
+    `说明：\n` +
+    `• 地址只填根路径即可（无需加 /api），程序会自动补全\n` +
+    `• 重启后该节点会立刻出现在统计页面，且 Publish 后仍然保留\n` +
+    `• ENV 节点与动态节点共存，自动负载均衡`;
+
+  const copyEnvPrompt = () => {
+    navigator.clipboard.writeText(ENV_NODE_PROMPT).then(() => {
+      setEnvPromptCopied(true);
+      setTimeout(() => setEnvPromptCopied(false), 2000);
+    });
+  };
 
   // All sub-nodes (everything except "local")
   const allSubNodes = stats
@@ -651,6 +673,33 @@ function PageStats({
                 flexShrink: 0,
               }}>{addState === "loading" ? "添加中…" : "添加节点"}</button>
             </form>
+
+            {/* ENV node via Replit Agent */}
+            <div style={{ marginTop: "14px", borderTop: "1px solid rgba(255,255,255,0.05)", paddingTop: "14px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+                <div style={{ flex: 1, minWidth: "180px" }}>
+                  <div style={{ fontSize: "12.5px", color: "#94a3b8", fontWeight: 600, marginBottom: "3px" }}>通过环境变量添加（永久节点）</div>
+                  <div style={{ fontSize: "11.5px", color: "#475569", lineHeight: "1.5" }}>
+                    ENV 节点写入 Secrets，Publish 后不会丢失。复制提示词发给 Replit Agent 自动完成配置。
+                  </div>
+                </div>
+                <button
+                  onClick={copyEnvPrompt}
+                  style={{
+                    display: "flex", alignItems: "center", gap: "6px",
+                    background: envPromptCopied ? "rgba(74,222,128,0.12)" : "rgba(99,102,241,0.1)",
+                    border: `1px solid ${envPromptCopied ? "rgba(74,222,128,0.4)" : "rgba(99,102,241,0.3)"}`,
+                    borderRadius: "8px", padding: "8px 16px",
+                    color: envPromptCopied ? "#4ade80" : "#a78bfa",
+                    fontSize: "13px", fontWeight: 600, cursor: "pointer",
+                    transition: "all 0.2s", flexShrink: 0,
+                  }}
+                >
+                  <span style={{ fontSize: "14px" }}>{envPromptCopied ? "✓" : "📋"}</span>
+                  {envPromptCopied ? "已复制！" : "复制提示词"}
+                </button>
+              </div>
+            </div>
             {(() => {
               const raw = addUrl.trim();
               const normed = normalizeBackendUrl(raw);
