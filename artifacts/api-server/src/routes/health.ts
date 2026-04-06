@@ -15,7 +15,8 @@ router.get("/setup-status", (_req, res) => {
     !!process.env.AI_INTEGRATIONS_OPENAI_BASE_URL &&
     !!process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY &&
     !!process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL;
-  res.json({ configured, integrationsReady });
+  const storageReady = !!process.env.DEFAULT_OBJECT_STORAGE_BUCKET_ID;
+  res.json({ configured, integrationsReady, storageReady });
 });
 
 export default router;
