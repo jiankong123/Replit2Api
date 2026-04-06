@@ -260,6 +260,7 @@ function PageHome({
             version: "v1.0.7",
             date: "2026-04-06",
             items: [
+              { zh: "修复子节点 / 禁用模型数据 publish 后丢失：改用 Replit 云端对象存储（GCS）持久化，重新部署不再清空", en: "Fix: dynamic backends and disabled models now persisted to GCS — data survives redeploys" },
               { zh: "修复「重新检测」按钮在错误状态下不可点击的问题；点击后显示 loading 旋转和完成提示", en: "Fix: 'Re-check' button is now always clickable even after an error; shows spinner and completion feedback" },
               { zh: "修复「检测更新」弹窗按钮在 error 状态重置流程；新增无更新时「已是最新版本」提示", en: "Fix update modal error-state reset flow; show 'Already up to date' notice when no update is available" },
               { zh: "统计页面：/v1/stats 现在包含全部后端节点（含禁用的），禁用节点以红色边框 + 「已禁用」标签区分", en: "Stats page: /v1/stats now includes all backends including disabled ones; disabled rows show red border + badge" },
