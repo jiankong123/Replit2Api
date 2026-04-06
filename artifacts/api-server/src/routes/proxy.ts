@@ -253,6 +253,14 @@ function pickBackend(): Backend {
   return backend;
 }
 
+function pickBackendExcluding(exclude: Set<string>): Backend | null {
+  const pool = buildBackendPool().filter(
+    (b) => b.kind === "local" || !exclude.has(b.url)
+  );
+  if (pool.length === 0) return null;
+  return pool[requestCounter % pool.length];
+}
+
 // ---------------------------------------------------------------------------
 // Client factories
 // ---------------------------------------------------------------------------
@@ -533,8 +541,6 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
     selectedModel === base || selectedModel.startsWith(`${base}-thinking`)
   );
   const shouldStream = stream ?? false;
-  const backend = pickBackend();
-  const backendLabel = backend.kind === "local" ? "local" : backend.label;
   const startTime = Date.now();
 
   // SillyTavern 兼容模式：对 Claude 模型自动追加「继续」消息（仅无 tool calling 时）
@@ -542,53 +548,78 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
     ? [...messages, { role: "user" as const, content: "继续" }]
     : messages;
 
-  req.log.info({ model: selectedModel, backend: backendLabel, counter: requestCounter - 1, sillyTavern: isClaudeModel && getSillyTavernMode(), toolCount: tools?.length ?? 0 }, "Proxy request");
+  const MAX_FRIEND_RETRIES = 3;
+  const triedFriendUrls = new Set<string>();
+  let backend = pickBackend();
 
-  try {
-    let result: { promptTokens: number; completionTokens: number; ttftMs?: number };
-    if (backend.kind === "friend") {
-      result = await handleFriendProxy({ req, res, backend, model: selectedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime });
-    } else if (isClaudeModel) {
-      const thinkingVisible = selectedModel.endsWith("-thinking-visible");
-      const thinkingEnabled = thinkingVisible || selectedModel.endsWith("-thinking");
-      const actualModel = thinkingVisible
-        ? selectedModel.replace(/-thinking-visible$/, "")
-        : thinkingEnabled
-          ? selectedModel.replace(/-thinking$/, "")
-          : selectedModel;
-      const CLAUDE_MODEL_MAX: Record<string, number> = {
-        "claude-haiku-4-5": 8096,
-        "claude-sonnet-4-5": 64000,
-        "claude-sonnet-4-6": 64000,
-        "claude-opus-4-1": 64000,
-        "claude-opus-4-5": 64000,
-        "claude-opus-4-6": 64000,
-      };
-      const modelMax = CLAUDE_MODEL_MAX[actualModel] ?? 32000;
-      const defaultMaxTokens = thinkingEnabled ? Math.max(modelMax, 32000) : modelMax;
-      const client = makeLocalAnthropic();
-      result = await handleClaude({ req, res, client, model: actualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens ?? defaultMaxTokens, thinking: thinkingEnabled, tools, toolChoice: tool_choice, startTime });
-    } else {
-      const client = makeLocalOpenAI();
-      result = await handleOpenAI({ req, res, client, model: selectedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime });
-    }
-    recordCallStat(backendLabel, Date.now() - startTime, result.promptTokens, result.completionTokens, result.ttftMs);
-  } catch (err: unknown) {
-    recordErrorStat(backendLabel);
-    if (backend.kind === "friend") {
-      const isNetworkErr = err instanceof TypeError || (err instanceof Error && err.message.includes("fetch"));
-      if (isNetworkErr) {
-        setHealth(backend.url, false);
-        req.log.warn({ url: backend.url }, "Friend backend marked unhealthy after failure");
+  for (let attempt = 0; ; attempt++) {
+    const backendLabel = backend.kind === "local" ? "local" : backend.label;
+    req.log.info({ model: selectedModel, backend: backendLabel, attempt, counter: requestCounter - 1, sillyTavern: isClaudeModel && getSillyTavernMode(), toolCount: tools?.length ?? 0 }, "Proxy request");
+
+    try {
+      let result: { promptTokens: number; completionTokens: number; ttftMs?: number };
+      if (backend.kind === "friend") {
+        triedFriendUrls.add(backend.url);
+        result = await handleFriendProxy({ req, res, backend, model: selectedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime });
+      } else if (isClaudeModel) {
+        const thinkingVisible = selectedModel.endsWith("-thinking-visible");
+        const thinkingEnabled = thinkingVisible || selectedModel.endsWith("-thinking");
+        const actualModel = thinkingVisible
+          ? selectedModel.replace(/-thinking-visible$/, "")
+          : thinkingEnabled
+            ? selectedModel.replace(/-thinking$/, "")
+            : selectedModel;
+        const CLAUDE_MODEL_MAX: Record<string, number> = {
+          "claude-haiku-4-5": 8096,
+          "claude-sonnet-4-5": 64000,
+          "claude-sonnet-4-6": 64000,
+          "claude-opus-4-1": 64000,
+          "claude-opus-4-5": 64000,
+          "claude-opus-4-6": 64000,
+        };
+        const modelMax = CLAUDE_MODEL_MAX[actualModel] ?? 32000;
+        const defaultMaxTokens = thinkingEnabled ? Math.max(modelMax, 32000) : modelMax;
+        const client = makeLocalAnthropic();
+        result = await handleClaude({ req, res, client, model: actualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens ?? defaultMaxTokens, thinking: thinkingEnabled, tools, toolChoice: tool_choice, startTime });
+      } else {
+        const client = makeLocalOpenAI();
+        result = await handleOpenAI({ req, res, client, model: selectedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime });
       }
-    }
-    req.log.error({ err }, "Proxy request failed");
-    if (!res.headersSent) {
-      res.status(500).json({ error: { message: err instanceof Error ? err.message : "Unknown error", type: "server_error" } });
-    } else {
-      writeAndFlush(res, `data: ${JSON.stringify({ error: { message: err instanceof Error ? err.message : "Unknown error" } })}\n\n`);
-      writeAndFlush(res, "data: [DONE]\n\n");
-      res.end();
+      // ✅ Success — record stats and exit retry loop
+      recordCallStat(backendLabel, Date.now() - startTime, result.promptTokens, result.completionTokens, result.ttftMs);
+      break;
+    } catch (err: unknown) {
+      // ❌ Failure — record error, decide whether to retry on a different node
+      recordErrorStat(backendLabel);
+
+      const is5xx = err instanceof FriendProxyHttpError && err.status >= 500;
+      const errMsg = err instanceof Error ? err.message : "";
+      const isNetworkErr = err instanceof TypeError
+        || ["fetch", "aborted", "terminated", "closed", "upstream", "ECONNRESET", "socket hang up", "UND_ERR"]
+          .some((kw) => errMsg.includes(kw));
+
+      if (backend.kind === "friend" && (is5xx || isNetworkErr)) {
+        setHealth(backend.url, false);
+        req.log.warn({ url: backend.url, attempt, is5xx, isNetworkErr }, "Friend backend marked unhealthy, considering retry");
+
+        if (attempt < MAX_FRIEND_RETRIES && !res.headersSent) {
+          const next = pickBackendExcluding(triedFriendUrls);
+          if (next?.kind === "friend") {
+            backend = next;
+            continue; // retry with next friend node
+          }
+        }
+      }
+
+      req.log.error({ err }, "Proxy request failed");
+      if (!res.headersSent) {
+        res.status(500).json({ error: { message: errMsg || "Unknown error", type: "server_error" } });
+      } else {
+        writeAndFlush(res, `data: ${JSON.stringify({ error: { message: errMsg || "Unknown error" } })}\n\n`);
+        writeAndFlush(res, "data: [DONE]\n\n");
+        res.end();
+      }
+      break;
     }
   }
 });
@@ -824,8 +855,19 @@ router.patch("/v1/admin/models", requireApiKey, (req: Request, res: Response) =>
 // Handlers
 // ---------------------------------------------------------------------------
 
+// Distinguishes upstream HTTP errors (5xx) from network/timeout errors so the
+// retry logic can make the right decision about whether to try another node.
+class FriendProxyHttpError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+    this.name = "FriendProxyHttpError";
+  }
+}
+
 // handleFriendProxy — raw fetch (bypasses SDK SSE parsing) so chunk.usage is
 // captured reliably regardless of the friend proxy's SDK version or chunk format.
+// SSE headers are committed only after the first chunk arrives, which preserves
+// the retry window in case the upstream connection fails immediately.
 async function handleFriendProxy({
   req, res, backend, model, messages, stream, maxTokens, tools, toolChoice, startTime,
 }: {
@@ -841,7 +883,7 @@ async function handleFriendProxy({
   startTime: number;
 }): Promise<{ promptTokens: number; completionTokens: number; ttftMs?: number }> {
   const body: Record<string, unknown> = { model, messages, stream };
-  if (maxTokens) body["max_tokens"] = maxTokens;
+  body["max_tokens"] = maxTokens ?? 16000; // always override sub-node's potentially low default
   if (stream) body["stream_options"] = { include_usage: true };
   if (tools?.length) body["tools"] = tools;
   if (toolChoice !== undefined) body["tool_choice"] = toolChoice;
@@ -858,15 +900,16 @@ async function handleFriendProxy({
 
   if (!fetchRes.ok) {
     const errText = await fetchRes.text().catch(() => "unknown");
-    throw new Error(`Friend proxy error ${fetchRes.status}: ${errText}`);
+    throw new FriendProxyHttpError(fetchRes.status, `Friend proxy error ${fetchRes.status}: ${errText}`);
   }
 
   // ── Streaming ────────────────────────────────────────────────────────────
   if (stream) {
-    setSseHeaders(res);
     let promptTokens = 0;
     let completionTokens = 0;
     let ttftMs: number | undefined;
+    let outputChars = 0;
+    let headersCommitted = false;
 
     const reader = fetchRes.body!.getReader();
     const decoder = new TextDecoder();
@@ -876,20 +919,19 @@ async function handleFriendProxy({
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        buf += decoder.decode(value, { stream: true });
 
-        // Process all complete lines in the buffer
+        // Delay committing SSE headers until first chunk — preserves retry window
+        if (!headersCommitted) { setSseHeaders(res); headersCommitted = true; }
+
+        buf += decoder.decode(value, { stream: true });
         const lines = buf.split("\n");
-        buf = lines.pop() ?? ""; // keep the incomplete last line
+        buf = lines.pop() ?? "";
 
         for (const line of lines) {
           const trimmed = line.trimEnd();
           if (!trimmed.startsWith("data:")) continue;
           const data = trimmed.slice(5).trim();
-          if (data === "[DONE]") {
-            writeAndFlush(res, "data: [DONE]\n\n");
-            continue;
-          }
+          if (data === "[DONE]") { writeAndFlush(res, "data: [DONE]\n\n"); continue; }
           try {
             const chunk = JSON.parse(data) as Record<string, unknown>;
             // Capture usage from any chunk that carries it
@@ -898,10 +940,11 @@ async function handleFriendProxy({
               promptTokens = usage.prompt_tokens ?? promptTokens;
               completionTokens = usage.completion_tokens ?? completionTokens;
             }
-            // Record TTFT on first content token
-            if (ttftMs === undefined) {
-              const choices = chunk["choices"] as Array<{ delta?: { content?: string } }> | undefined;
-              if (choices?.[0]?.delta?.content) ttftMs = Date.now() - startTime;
+            // Record TTFT + accumulate output chars for fallback estimation
+            const deltaContent = (chunk["choices"] as Array<{ delta?: { content?: string } }>)?.[0]?.delta?.content;
+            if (deltaContent) {
+              if (ttftMs === undefined) ttftMs = Date.now() - startTime;
+              outputChars += deltaContent.length;
             }
             writeAndFlush(res, `data: ${JSON.stringify(chunk)}\n\n`);
           } catch { /* skip malformed chunk */ }
@@ -910,7 +953,23 @@ async function handleFriendProxy({
     } finally {
       reader.releaseLock();
     }
+
+    if (!headersCommitted) throw new Error("upstream closed before first payload (empty body)");
     res.end();
+
+    // Fallback: estimate tokens from char count when sub-node didn't return usage
+    if (promptTokens === 0) {
+      const inputChars = messages.reduce((acc, m) => {
+        if (typeof m.content === "string") return acc + m.content.length;
+        if (Array.isArray(m.content))
+          return acc + (m.content as Array<{ type: string; text?: string }>)
+            .filter((p) => p.type === "text").reduce((a, p) => a + (p.text?.length ?? 0), 0);
+        return acc;
+      }, 0);
+      promptTokens = Math.ceil(inputChars / 4);
+      completionTokens = Math.ceil(outputChars / 4);
+    }
+
     return { promptTokens, completionTokens, ttftMs };
   }
 
@@ -918,10 +977,18 @@ async function handleFriendProxy({
   const json = await fetchRes.json() as Record<string, unknown>;
   res.json(json);
   const usage = json["usage"] as { prompt_tokens?: number; completion_tokens?: number } | null | undefined;
-  return {
-    promptTokens: usage?.prompt_tokens ?? 0,
-    completionTokens: usage?.completion_tokens ?? 0,
-  };
+  if ((usage?.prompt_tokens ?? 0) === 0) {
+    const inputChars = messages.reduce((acc, m) => {
+      if (typeof m.content === "string") return acc + m.content.length;
+      if (Array.isArray(m.content))
+        return acc + (m.content as Array<{ type: string; text?: string }>)
+          .filter((p) => p.type === "text").reduce((a, p) => a + (p.text?.length ?? 0), 0);
+      return acc;
+    }, 0);
+    const outputChars = (json["choices"] as Array<{ message?: { content?: string } }>)?.[0]?.message?.content?.length ?? 0;
+    return { promptTokens: Math.ceil(inputChars / 4), completionTokens: Math.ceil(outputChars / 4) };
+  }
+  return { promptTokens: usage?.prompt_tokens ?? 0, completionTokens: usage?.completion_tokens ?? 0 };
 }
 
 async function handleOpenAI({

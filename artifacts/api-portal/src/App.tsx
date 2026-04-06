@@ -258,6 +258,16 @@ function PageHome({
         {(() => {
           const releases = [
             {
+              version: "v1.1.0",
+              date: "2026-04-06",
+              items: [
+                { zh: "子节点请求失败自动重试（最多 3 次）：5xx 和网络错误均会自动换一个健康节点重试，不返回错误给客户端", en: "Friend proxy auto-retry: up to 3 attempts, skipping failed nodes on 5xx or network errors — client sees a clean response" },
+                { zh: "区分 HTTP 错误（5xx）与网络错误，精准标记节点不健康并决定是否重试", en: "FriendProxyHttpError distinguishes upstream 5xx from network/timeout errors for smarter retry decisions" },
+                { zh: "流式请求改为首个 chunk 到达后再发 SSE 头，确保在 chunk 来临前仍可切换节点", en: "Streaming: SSE headers committed only after first chunk arrives, preserving the retry window" },
+                { zh: "子节点未返回 usage 时按字符数自动估算 token 用量（≈4字符/token），统计页面不再显示 0", en: "Token fallback: estimate prompt + completion tokens from char count when sub-node omits usage field" },
+              ],
+            },
+            {
               version: "v1.0.9",
               date: "2026-04-06",
               items: [
