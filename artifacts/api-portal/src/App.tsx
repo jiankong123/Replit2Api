@@ -550,108 +550,157 @@ function PageStats({
         )}
       </Card>
 
-      <GitHubPublishCard baseUrl={baseUrl} apiKey={apiKey} />
       <FleetManager />
     </>
   );
 }
 
 // ---------------------------------------------------------------------------
-// GitHub 发布卡片（管理员使用：一键将当前代码推送到 GitHub）
+// UpdateBar — 全局顶部更新通知条（自动检测，有更新时展示）
 // ---------------------------------------------------------------------------
 
-function GitHubPublishCard({ baseUrl, apiKey }: { baseUrl: string; apiKey: string }) {
-  const [state, setState] = useState<"idle" | "loading" | "ok" | "err">("idle");
-  const [msg, setMsg] = useState("");
-  const [commitUrl, setCommitUrl] = useState("");
+type UBState = "idle" | "checking" | "applying" | "done" | "error";
 
-  const publish = async () => {
-    if (!apiKey) { setMsg("请先在首页填入 API Key"); setState("err"); return; }
-    setState("loading");
-    setMsg("正在推送到 GitHub…");
-    setCommitUrl("");
+function UpdateBar({ baseUrl, apiKey }: { baseUrl: string; apiKey: string }) {
+  const [hasUpdate, setHasUpdate] = useState(false);
+  const [latestVer, setLatestVer] = useState("");
+  const [releaseNotes, setReleaseNotes] = useState("");
+  const [ubState, setUbState] = useState<UBState>("idle");
+  const [msg, setMsg] = useState("");
+  const [dismissed, setDismissed] = useState(false);
+
+  const check = useCallback(async () => {
+    setUbState("checking");
     try {
-      const r = await fetch(`${baseUrl}/api/update/publish`, {
+      const r = await fetch(`${baseUrl}/api/update/version`);
+      if (!r.ok) { setUbState("idle"); return; }
+      const d = await r.json();
+      setHasUpdate(!!d.hasUpdate);
+      setLatestVer(d.latestVersion ?? "");
+      setReleaseNotes(d.latestReleaseNotes ?? "");
+      setUbState("idle");
+    } catch {
+      setUbState("idle");
+    }
+  }, [baseUrl]);
+
+  useEffect(() => {
+    check();
+    const t = setInterval(check, 10 * 60 * 1000);
+    return () => clearInterval(t);
+  }, [check]);
+
+  const applyUpdate = async () => {
+    if (!apiKey) {
+      setMsg("请先在首页填写 API Key 后再执行更新");
+      setUbState("error");
+      return;
+    }
+    setUbState("applying");
+    setMsg("正在从 GitHub 拉取最新代码，完成后将自动重启（约 30-60 秒）…");
+    try {
+      const r = await fetch(`${baseUrl}/api/update/apply`, {
         method: "POST",
         headers: { Authorization: `Bearer ${apiKey}` },
       });
       const d = await r.json();
-      if (!r.ok) { setState("err"); setMsg(d.error ?? "推送失败"); }
-      else {
-        setState("ok");
-        setMsg(`✓ 已推送 ${d.pushed} 个文件`);
-        if (d.commitUrl) setCommitUrl(d.commitUrl);
+      if (!r.ok) {
+        setUbState("error");
+        setMsg(d.error ?? "更新失败，请稍后重试");
+      } else {
+        setUbState("done");
+        setMsg("更新已启动，服务器正在重启，请稍候…");
+        setTimeout(() => window.location.reload(), 35000);
       }
     } catch {
-      setState("err"); setMsg("网络错误，请重试");
+      setUbState("error");
+      setMsg("网络错误，请重试");
     }
   };
 
-  return (
-    <Card style={{ marginBottom: "14px" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "12px" }}>
-        <div>
-          <SectionTitle>同步到 GitHub</SectionTitle>
-          <p style={{ margin: "4px 0 0", fontSize: "12px", color: "#334155" }}>
-            将当前版本以单次 commit 推送到{" "}
-            <a href={`https://github.com/Akatsuki03/Replit2Api`} target="_blank" rel="noreferrer"
-              style={{ color: "#818cf8", textDecoration: "none" }}>
-              Akatsuki03/Replit2Api
-            </a>
-            ，子节点可自动从 GitHub 检测并拉取更新。
-          </p>
-        </div>
-        <button
-          onClick={publish}
-          disabled={state === "loading" || !apiKey}
-          style={{
-            background: state === "ok" ? "rgba(74,222,128,0.15)" : "rgba(99,102,241,0.2)",
-            border: `1px solid ${state === "ok" ? "rgba(74,222,128,0.4)" : "rgba(99,102,241,0.4)"}`,
-            color: state === "ok" ? "#4ade80" : "#818cf8",
-            borderRadius: "8px", padding: "8px 16px", fontSize: "13px", fontWeight: 600,
-            cursor: (state === "loading" || !apiKey) ? "not-allowed" : "pointer",
-            opacity: !apiKey ? 0.5 : 1, flexShrink: 0, whiteSpace: "nowrap",
-          }}
-        >
-          {state === "loading" ? "推送中…" : state === "ok" ? "已同步 ✓" : "📤 推送到 GitHub"}
-        </button>
-      </div>
+  if (dismissed || (!hasUpdate && ubState !== "applying" && ubState !== "done" && ubState !== "error")) return null;
 
-      {/* 状态提示 */}
-      {msg && (
-        <div style={{
-          padding: "8px 12px", borderRadius: "8px", fontSize: "12.5px",
-          background: state === "err" ? "rgba(239,68,68,0.08)" : "rgba(99,102,241,0.08)",
-          border: `1px solid ${state === "err" ? "rgba(239,68,68,0.2)" : "rgba(99,102,241,0.2)"}`,
-          color: state === "err" ? "#f87171" : "#94a3b8",
-        }}>
-          {msg}
-          {commitUrl && (
-            <a href={commitUrl} target="_blank" rel="noreferrer"
-              style={{ color: "#818cf8", marginLeft: "10px", textDecoration: "none", fontSize: "11.5px" }}>
-              查看 commit →
-            </a>
+  const isWorking = ubState === "applying";
+  const isDone = ubState === "done";
+  const isError = ubState === "error";
+
+  return (
+    <div style={{
+      position: "sticky", top: 0, zIndex: 1000,
+      background: isError ? "rgba(239,68,68,0.12)" : isDone ? "rgba(74,222,128,0.1)" : "rgba(251,191,36,0.1)",
+      borderBottom: `1px solid ${isError ? "rgba(239,68,68,0.3)" : isDone ? "rgba(74,222,128,0.25)" : "rgba(251,191,36,0.3)"}`,
+      backdropFilter: "blur(12px)",
+    }}>
+      <div style={{
+        maxWidth: "900px", margin: "0 auto", padding: "10px 24px",
+        display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap",
+      }}>
+        {/* 图标 */}
+        <span style={{ fontSize: "16px", flexShrink: 0 }}>
+          {isError ? "⚠️" : isDone ? "✓" : isWorking ? "⟳" : "🎉"}
+        </span>
+
+        {/* 文字 */}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          {(isWorking || isDone || isError) ? (
+            <span style={{
+              fontSize: "13px",
+              color: isError ? "#f87171" : isDone ? "#4ade80" : "#fbbf24",
+            }}>{msg}</span>
+          ) : (
+            <span style={{ fontSize: "13px", color: "#fbbf24" }}>
+              <strong>发现新版本 v{latestVer}</strong>
+              {releaseNotes && <span style={{ color: "#92400e", marginLeft: "10px", fontSize: "12px" }}>{releaseNotes}</span>}
+            </span>
           )}
         </div>
-      )}
 
-      {/* 子节点配置提示 */}
-      <div style={{
-        marginTop: "12px", padding: "9px 12px", borderRadius: "8px",
-        background: "rgba(0,0,0,0.2)", border: "1px solid rgba(255,255,255,0.06)",
-        fontSize: "12px", color: "#475569", lineHeight: "1.8",
-      }}>
-        <span style={{ color: "#64748b", fontWeight: 600 }}>子节点配置：</span>{" "}
-        在 Remix 实例的 Replit Secrets 中设置
-        <code style={{ color: "#a78bfa", fontSize: "11px", background: "rgba(167,139,250,0.1)", borderRadius: "4px", padding: "1px 5px", marginLeft: "4px" }}>
-          UPDATE_CHECK_URL
-        </code>
-        {" "}={" "}
-        <code style={{ color: "#94a3b8", fontSize: "11px", wordBreak: "break-all" }}>
-          https://raw.githubusercontent.com/Akatsuki03/Replit2Api/main/version.json
-        </code>
+        {/* 操作按钮 */}
+        {!isDone && (
+          <button
+            onClick={applyUpdate}
+            disabled={isWorking}
+            style={{
+              padding: "5px 14px", borderRadius: "7px", fontSize: "12.5px", fontWeight: 700,
+              border: "1px solid rgba(251,191,36,0.5)", flexShrink: 0,
+              background: isWorking ? "rgba(251,191,36,0.05)" : "rgba(251,191,36,0.18)",
+              color: "#fbbf24", cursor: isWorking ? "not-allowed" : "pointer",
+              opacity: isWorking ? 0.6 : 1,
+            }}
+          >
+            {isWorking ? "更新中…" : "立即更新"}
+          </button>
+        )}
+
+        {/* 检查更新（idle 态） */}
+        {!isWorking && !isDone && !isError && (
+          <button
+            onClick={check}
+            style={{
+              padding: "5px 10px", borderRadius: "7px", fontSize: "12px",
+              border: "1px solid rgba(251,191,36,0.25)",
+              background: "transparent", color: "#92400e", cursor: "pointer",
+              flexShrink: 0,
+            }}
+          >
+            重新检测
+          </button>
+        )}
+
+        {/* 关闭 */}
+        {!isWorking && !isDone && (
+          <button
+            onClick={() => setDismissed(true)}
+            style={{
+              background: "none", border: "none", color: "#92400e",
+              fontSize: "18px", cursor: "pointer", flexShrink: 0, lineHeight: 1,
+            }}
+          >×</button>
+        )}
       </div>
-    </Card>
+
+      <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
+    </div>
   );
 }
 
@@ -1198,6 +1247,8 @@ export default function App() {
       {showWizard && (
         <SetupWizard baseUrl={baseUrl} onComplete={() => setShowWizard(false)} onDismiss={() => setShowWizard(false)} />
       )}
+
+      <UpdateBar baseUrl={baseUrl} apiKey={apiKey} />
 
       <div style={{ maxWidth: "900px", margin: "0 auto", padding: "32px 24px 80px" }}>
 

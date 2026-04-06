@@ -166,91 +166,6 @@ function buildBundle(): Record<string, string> {
   return files;
 }
 
-// ---------------------------------------------------------------------------
-// GitHub: 将所有 bundle 文件以单次 commit 推送到 GitHub
-// 需要 GITHUB_TOKEN（Personal Access Token 或 Fine-grained token）
-// ---------------------------------------------------------------------------
-
-interface GitHubPublishResult {
-  pushed: number;
-  commitSha: string;
-  commitUrl: string;
-}
-
-async function publishToGitHub(): Promise<GitHubPublishResult> {
-  const token = process.env.GITHUB_TOKEN;
-  if (!token) throw new Error("GITHUB_TOKEN 未配置，请在 Replit Secrets 中设置");
-
-  const files = buildBundle();
-
-  // 1. 获取当前 HEAD commit SHA
-  const refRes = await fetch(`${GITHUB_API}/git/refs/heads/${GITHUB_BRANCH}`, { headers: githubHeaders() });
-  if (!refRes.ok) throw new Error(`获取 branch ref 失败: HTTP ${refRes.status}`);
-  const refData = await refRes.json() as { object: { sha: string } };
-  const headSha = refData.object.sha;
-
-  // 2. 获取当前 commit 的 tree SHA
-  const commitRes = await fetch(`${GITHUB_API}/git/commits/${headSha}`, { headers: githubHeaders() });
-  if (!commitRes.ok) throw new Error(`获取 commit 失败: HTTP ${commitRes.status}`);
-  const commitData = await commitRes.json() as { tree: { sha: string } };
-  const baseTreeSha = commitData.tree.sha;
-
-  // 3. 为每个文件创建 blob
-  const treeItems: { path: string; mode: string; type: string; sha: string }[] = [];
-  for (const [relPath, content] of Object.entries(files)) {
-    const blobRes = await fetch(`${GITHUB_API}/git/blobs`, {
-      method: "POST",
-      headers: { ...githubHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({
-        content: Buffer.from(content, "utf8").toString("base64"),
-        encoding: "base64",
-      }),
-    });
-    if (!blobRes.ok) {
-      console.warn(`[publish] blob 创建失败: ${relPath}`);
-      continue;
-    }
-    const blob = await blobRes.json() as { sha: string };
-    treeItems.push({ path: relPath, mode: "100644", type: "blob", sha: blob.sha });
-  }
-
-  // 4. 创建新 tree（基于当前 tree，仅替换 bundle 文件）
-  const treeRes = await fetch(`${GITHUB_API}/git/trees`, {
-    method: "POST",
-    headers: { ...githubHeaders(), "Content-Type": "application/json" },
-    body: JSON.stringify({ base_tree: baseTreeSha, tree: treeItems }),
-  });
-  if (!treeRes.ok) throw new Error(`创建 tree 失败: HTTP ${treeRes.status}`);
-  const newTree = await treeRes.json() as { sha: string };
-
-  // 5. 创建 commit
-  const ver = readLocalVersion();
-  const newCommitRes = await fetch(`${GITHUB_API}/git/commits`, {
-    method: "POST",
-    headers: { ...githubHeaders(), "Content-Type": "application/json" },
-    body: JSON.stringify({
-      message: `release: v${ver.version}\n\n${ver.releaseNotes ?? ""}`.trim(),
-      tree: newTree.sha,
-      parents: [headSha],
-    }),
-  });
-  if (!newCommitRes.ok) throw new Error(`创建 commit 失败: HTTP ${newCommitRes.status}`);
-  const newCommit = await newCommitRes.json() as { sha: string };
-
-  // 6. 更新 branch ref
-  const updateRes = await fetch(`${GITHUB_API}/git/refs/heads/${GITHUB_BRANCH}`, {
-    method: "PATCH",
-    headers: { ...githubHeaders(), "Content-Type": "application/json" },
-    body: JSON.stringify({ sha: newCommit.sha }),
-  });
-  if (!updateRes.ok) throw new Error(`更新 branch 失败: HTTP ${updateRes.status}`);
-
-  return {
-    pushed: treeItems.length,
-    commitSha: newCommit.sha,
-    commitUrl: `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/commit/${newCommit.sha}`,
-  };
-}
 
 // ---------------------------------------------------------------------------
 // GitHub: 从 GitHub 下载最新文件并应用到本地
@@ -311,12 +226,8 @@ function isGitHubCheckUrl(url: string | undefined): boolean {
 
 router.get("/update/version", async (_req: Request, res: Response) => {
   const local = readLocalVersion();
-  const checkUrl = process.env.UPDATE_CHECK_URL;
-
-  if (!checkUrl) {
-    res.json({ ...local, hasUpdate: false, updateCheckDisabled: true, githubUrl: GITHUB_RAW_VERSION_URL });
-    return;
-  }
+  // 优先使用环境变量，否则默认使用官方 GitHub 仓库
+  const checkUrl = process.env.UPDATE_CHECK_URL || GITHUB_RAW_VERSION_URL;
 
   try {
     const controller = new AbortController();
@@ -354,35 +265,6 @@ router.get("/update/bundle", (_req: Request, res: Response) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /update/publish — 受保护：将当前代码推送到 GitHub（单次 commit）
-// 需要 GITHUB_TOKEN Secret
-// ---------------------------------------------------------------------------
-
-let publishInProgress = false;
-
-router.post("/update/publish", async (req: Request, res: Response) => {
-  if (!checkApiKey(req, res)) return;
-  if (publishInProgress) {
-    res.status(409).json({ error: "推送正在进行中，请稍候" });
-    return;
-  }
-  publishInProgress = true;
-  try {
-    const result = await publishToGitHub();
-    res.json({
-      status: "ok",
-      message: `已推送 ${result.pushed} 个文件到 GitHub`,
-      ...result,
-      githubUrl: `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}`,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : "推送失败" });
-  } finally {
-    publishInProgress = false;
-  }
-});
-
-// ---------------------------------------------------------------------------
 // POST /update/apply — 受保护：从 GitHub 或上游 Replit 拉取更新并重启
 // 若 UPDATE_CHECK_URL 指向 GitHub raw → 从 GitHub 拉取
 // 否则 → 沿用旧版 Replit bundle 模式
@@ -398,15 +280,8 @@ router.post("/update/apply", async (req: Request, res: Response) => {
   }
 
   const checkUrl = process.env.UPDATE_CHECK_URL;
-  const useGitHub = isGitHubCheckUrl(checkUrl) || process.env.GITHUB_APPLY === "true";
-
-  if (!useGitHub && !checkUrl) {
-    res.status(400).json({
-      error: "未配置更新来源",
-      hint: `请设置 Secret: UPDATE_CHECK_URL = ${GITHUB_RAW_VERSION_URL}`,
-    });
-    return;
-  }
+  // 默认始终使用 GitHub 模式；若设置了非 GitHub 的 UPDATE_CHECK_URL 则用旧版 bundle 模式
+  const useGitHub = !checkUrl || isGitHubCheckUrl(checkUrl) || process.env.GITHUB_APPLY === "true";
 
   res.json({
     status: "started",
@@ -420,7 +295,7 @@ router.post("/update/apply", async (req: Request, res: Response) => {
   (async () => {
     try {
       if (useGitHub) {
-        // GitHub 模式
+        // GitHub 模式（默认）
         const { written } = await applyFromGitHub();
         console.log(`[update] 从 GitHub 写入 ${written} 个文件`);
       } else {
@@ -459,7 +334,6 @@ router.post("/update/apply", async (req: Request, res: Response) => {
 router.get("/update/status", (_req: Request, res: Response) => {
   res.json({
     inProgress: updateInProgress,
-    publishInProgress,
     githubRepo: `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}`,
     githubRawVersionUrl: GITHUB_RAW_VERSION_URL,
   });

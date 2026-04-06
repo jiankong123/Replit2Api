@@ -69,7 +69,7 @@ export default function UpdateBadge({ baseUrl, apiKey }: Props) {
 
   if (!info) return null;
 
-  const hasUpdate = info.hasUpdate && !info.updateCheckDisabled;
+  const hasUpdate = info.hasUpdate;
 
   return (
     <>
@@ -143,25 +143,6 @@ export default function UpdateBadge({ baseUrl, apiKey }: Props) {
               }}>
                 <div style={{ color: "#818cf8", fontSize: "11px", fontWeight: 700, marginBottom: "6px" }}>当前版本说明</div>
                 <div style={{ color: "#94a3b8", fontSize: "13px", lineHeight: "1.6" }}>{info.releaseNotes}</div>
-              </div>
-            )}
-
-            {/* 更新状态 */}
-            {info.updateCheckDisabled && (
-              <div style={{
-                background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)",
-                borderRadius: "10px", padding: "12px 14px", marginBottom: "16px",
-                color: "#475569", fontSize: "13px", lineHeight: "1.7",
-              }}>
-                <div style={{ color: "#64748b", fontWeight: 600, marginBottom: "6px", fontSize: "12px" }}>未启用自动更新</div>
-                如需接收新版本推送，请通过 Replit Agent 设置 Secret：
-                <code style={{ display: "block", marginTop: "8px", padding: "8px 10px", borderRadius: "6px",
-                  background: "rgba(0,0,0,0.3)", color: "#94a3b8", fontSize: "11.5px", wordBreak: "break-all" }}>
-                  UPDATE_CHECK_URL = https://raw.githubusercontent.com/Akatsuki03/Replit2Api/main/version.json
-                </code>
-                <div style={{ color: "#475569", fontSize: "12px", marginTop: "8px" }}>
-                  设置后，更新包将直接从 GitHub 仓库拉取，无需依赖上游 Replit 实例在线。
-                </div>
               </div>
             )}
 

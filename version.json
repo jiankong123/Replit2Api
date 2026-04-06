@@ -1,7 +1,6 @@
 {
-  "version": "1.0.1",
+  "version": "1.0.2",
   "name": "AI Proxy Gateway",
   "releaseDate": "2026-04-06",
-  "releaseNotes": "v1.0.1 — 完整 tool calling 支持（Claude/Gemini 自动格式转换）；前端三栏重构（首页/统计节点/端点文档）；子节点批量管理面板（Fleet Manager）",
-  "upstreamUrl": "https://replit-api-public-Akatsukis036s.replit.app"
+  "releaseNotes": "v1.0.2 — 顶部自动更新通知条（开箱即用，无需配置）；更新源统一指向 Akatsuki03/Replit2Api；移除用户端 GitHub 推送权限"
 }
