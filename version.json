@@ -1,6 +1,6 @@
 {
-  "version": "1.0.4β",
+  "version": "1.0.4c",
   "name": "AI Proxy Gateway",
   "releaseDate": "2026-04-06",
-  "releaseNotes": "v1.0.4β — 子节点 URL 自动补全 /api（仅路由层，Base URL 不变）；FleetManager 根地址保持原样；服务端 getFriendProxyConfigs 同步规范化"
+  "releaseNotes": "v1.0.4c — fix ERR_INVALID_CHAR: strip non-ASCII from version string before writing X-Proxy-Version header; all runtime log/response strings converted to ASCII-only English"
 }

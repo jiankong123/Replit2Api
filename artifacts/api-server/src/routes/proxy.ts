@@ -96,9 +96,9 @@ function saveDynamicBackends(list: DynamicBackend[]): void {
 
 let dynamicBackends: DynamicBackend[] = loadDynamicBackends();
 
-// 子节点端点规范化：确保 URL 以 /api 结尾
-// 正确格式: https://{project}.replit.app/api
-// 本地 backend（OpenAI/Anthropic/Gemini）走各自独立路由，不经过此函数
+// Normalize sub-node endpoint URL — ensures it ends with /api.
+// Correct format: https://{project}.replit.app/api
+// Local backends (OpenAI/Anthropic/Gemini) have their own routes and never pass through here.
 function normalizeSubNodeUrl(raw: string): string {
   const url = raw.trim().replace(/\/+$/, "");
   if (!url) return url;

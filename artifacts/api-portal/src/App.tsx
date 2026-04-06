@@ -850,8 +850,8 @@ function saveFleet(data: FleetInstance[]) {
 }
 function genId() { return Math.random().toString(36).slice(2, 9); }
 
-// 将用户输入的 URL 规范化为正确的后端端点
-// 正确格式: https://{project}.replit.app/api
+// Normalize user-supplied URL to the correct backend endpoint.
+// Expected format: https://{project}.replit.app/api
 function normalizeBackendUrl(raw: string): string {
   const url = raw.trim().replace(/\/+$/, "");
   if (!url) return url;
