@@ -62,17 +62,38 @@ function readLocalVersion(): VersionInfo {
   return { version: "unknown" };
 }
 
-function parseVersion(v: string): number[] {
-  return v.replace(/^v/i, "").split(".").map((n) => parseInt(n, 10) || 0);
+// 解析版本号，支持 v1.2.3、v1.2.3α、v1.2.3-beta、v1.2.3rc1 等格式
+// 返回 { nums: 数字段[], pre: 预发布后缀（空字符串表示正式版）}
+function parseVersion(v: string): { nums: number[]; pre: string } {
+  const clean = v.replace(/^v/i, "").trim();
+  // 匹配数字部分（允许多段）和可选的预发布后缀
+  const match = clean.match(/^([\d]+(?:\.[\d]+)*)(.*)$/);
+  if (!match) return { nums: [0], pre: "" };
+  const nums = match[1].split(".").map((n) => parseInt(n, 10) || 0);
+  const pre  = match[2].trim(); // α β rc1 -alpha 等
+  return { nums, pre };
 }
 
 function isNewer(remote: string, local: string): boolean {
   const r = parseVersion(remote);
   const l = parseVersion(local);
-  for (let i = 0; i < Math.max(r.length, l.length); i++) {
-    if ((r[i] ?? 0) > (l[i] ?? 0)) return true;
-    if ((r[i] ?? 0) < (l[i] ?? 0)) return false;
+  const len = Math.max(r.nums.length, l.nums.length);
+
+  // 先按数字段比较
+  for (let i = 0; i < len; i++) {
+    if ((r.nums[i] ?? 0) > (l.nums[i] ?? 0)) return true;
+    if ((r.nums[i] ?? 0) < (l.nums[i] ?? 0)) return false;
   }
+
+  // 数字段完全相同时，正式版 > 预发布版
+  // remote 无后缀（正式版）而 local 有后缀（预发布）→ 有更新
+  if (!r.pre && l.pre) return true;
+  // remote 有后缀而 local 无后缀 → local 反而更新，无需升级
+  if (r.pre && !l.pre) return false;
+
+  // 两者都有后缀：按字符串字典序比较（rc2 > rc1 > beta > alpha > α）
+  if (r.pre && l.pre) return r.pre > l.pre;
+
   return false;
 }
 

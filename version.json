@@ -1,6 +1,6 @@
 {
-  "version": "1.0.3",
+  "version": "1.0.4α",
   "name": "AI Proxy Gateway",
   "releaseDate": "2026-04-06",
-  "releaseNotes": "v1.0.3 — 节点多选/全选批量启用禁用移除；配置向导移除 UPDATE_CHECK_URL 步骤（自动更新已内置）"
+  "releaseNotes": "v1.0.4α — 修复版本比较逻辑，正确识别 α/β/rc 等预发布后缀"
 }
