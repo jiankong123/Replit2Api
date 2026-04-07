@@ -580,13 +580,12 @@ function PageStats({
           <div style={{ fontSize: "13px", color: "#f87171", lineHeight: "1.7" }}>
             <div style={{ fontWeight: 600, marginBottom: "6px" }}>认证失败（API Key 不匹配）</div>
             <div style={{ color: "#94a3b8", fontSize: "12.5px" }}>
-              首页填入的 API Key 需与服务器 Secrets 中的 <code style={{ color: "#a78bfa", fontFamily: "Menlo, monospace" }}>PROXY_API_KEY</code> 完全一致。
+              首页填入的 API Key 需与配置时设定的密码完全一致。
             </div>
             <div style={{ color: "#475569", fontSize: "12px", marginTop: "6px" }}>
-              如果你是 Remix/Fork 的项目，这个 Key 由配置助手自动生成，从未显示过。
-              请在 Replit 左侧边栏 <strong style={{ color: "#94a3b8" }}>🔒 Secrets</strong> 面板中找到
+              如果忘记了密码，请在 Replit 左侧边栏 <strong style={{ color: "#94a3b8" }}>🔒 Secrets</strong> 面板中查看
               <code style={{ color: "#a78bfa", fontFamily: "Menlo, monospace", marginLeft: "4px" }}>PROXY_API_KEY</code>
-              的值，复制后填到首页 API Key 输入框中。
+              的值，也可以重新运行配置助手修改密码。
             </div>
           </div>
         ) : !stats ? (
@@ -1849,7 +1848,14 @@ export default function App() {
       {showWizard && (
         <SetupWizard
           baseUrl={baseUrl}
-          onComplete={() => { sessionStorage.setItem("wizard_dismissed", "1"); setShowWizard(false); }}
+          onComplete={(key) => {
+            sessionStorage.setItem("wizard_dismissed", "1");
+            setShowWizard(false);
+            if (key) {
+              setApiKey(key);
+              localStorage.setItem("proxy_api_key", key);
+            }
+          }}
           onDismiss={() => { sessionStorage.setItem("wizard_dismissed", "1"); setShowWizard(false); }}
         />
       )}
