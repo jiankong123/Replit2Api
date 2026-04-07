@@ -132,13 +132,13 @@ function isModelEnabled(id: string): boolean {
   return !disabledModels.has(id);
 }
 
-// Normalize sub-node endpoint URL — ensures it ends with /api.
-// Correct format: https://{project}.replit.app/api
-// Local backends (OpenAI/Anthropic/Gemini) have their own routes and never pass through here.
+// Normalize sub-node endpoint URL — strips trailing slashes and any /api suffix.
+// Sub-node health checks hit {url}/v1/models directly at root.
 function normalizeSubNodeUrl(raw: string): string {
-  const url = raw.trim().replace(/\/+$/, "");
+  let url = raw.trim().replace(/\/+$/, "");
   if (!url) return url;
-  return /\/api$/i.test(url) ? url : url + "/api";
+  if (/\/api$/i.test(url)) url = url.replace(/\/api$/i, "");
+  return url;
 }
 
 function getFriendProxyConfigs(): { label: string; url: string; apiKey: string }[] {
