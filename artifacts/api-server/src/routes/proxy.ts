@@ -74,7 +74,7 @@ type Backend =
 interface HealthEntry { healthy: boolean; checkedAt: number }
 const healthCache = new Map<string, HealthEntry>();
 const HEALTH_TTL_MS = 30_000;   // reuse cached result for 30s
-const HEALTH_TIMEOUT_MS = 5_000; // 5s timeout per check
+const HEALTH_TIMEOUT_MS = 15_000; // 15s timeout per check (Replit cold starts can take 10–30s)
 
 // ---------------------------------------------------------------------------
 // Dynamic backends (cloud-persisted via GCS in production, local file in dev)
@@ -673,7 +673,8 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
         const client = makeLocalOpenAI();
         result = await handleOpenAI({ req, res, client, model: selectedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime });
       }
-      // ✅ Success — record stats and exit retry loop
+      // ✅ Success — record stats, mark friend healthy, and exit retry loop
+      if (backend.kind === "friend") setHealth(backend.url, true);
       recordCallStat(backendLabel, Date.now() - startTime, result.promptTokens, result.completionTokens, result.ttftMs);
       break;
     } catch (err: unknown) {
@@ -851,14 +852,14 @@ router.post("/v1/admin/backends", requireApiKey, (req: Request, res: Response) =
     return;
   }
   const cleanUrl = url.replace(/\/+$/, "");
+  const normalizedUrl = normalizeSubNodeUrl(cleanUrl);
   const allUrls = getFriendProxyConfigs().map((c) => c.url);
-  if (allUrls.includes(cleanUrl)) { res.status(409).json({ error: "URL already in pool" }); return; }
+  if (allUrls.includes(normalizedUrl)) { res.status(409).json({ error: "URL already in pool" }); return; }
   const label = `DYNAMIC_${dynamicBackends.length + 1}`;
   dynamicBackends.push({ label, url: cleanUrl });
   saveDynamicBackends(dynamicBackends);
-  // Kick off immediate health check
   const apiKey = process.env.PROXY_API_KEY ?? "";
-  probeHealth(cleanUrl, apiKey).then((ok) => setHealth(cleanUrl, ok)).catch(() => setHealth(cleanUrl, false));
+  probeHealth(normalizedUrl, apiKey).then((ok) => setHealth(normalizedUrl, ok)).catch(() => setHealth(normalizedUrl, false));
   res.json({ label, url: cleanUrl, source: "dynamic" });
 });
 
