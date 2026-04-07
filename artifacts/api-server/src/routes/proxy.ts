@@ -353,16 +353,21 @@ async function persistStats(): Promise<void> {
   try { await writeJson(STATS_FILE, statsToObject()); } catch {}
 }
 
-// Debounced save: schedule a write 10 s after the last stat update.
-// Prevents a GCS write on every single request while still saving promptly.
 let _saveTimer: ReturnType<typeof setTimeout> | null = null;
 function scheduleSave(): void {
   if (_saveTimer) clearTimeout(_saveTimer);
-  _saveTimer = setTimeout(() => { _saveTimer = null; void persistStats(); }, 10_000);
+  _saveTimer = setTimeout(() => { _saveTimer = null; void persistStats(); }, 2_000);
 }
 
-// Periodic safety-net save every 5 minutes.
-setInterval(() => { void persistStats(); }, 5 * 60 * 1000);
+setInterval(() => { void persistStats(); }, 60_000);
+
+for (const sig of ["SIGTERM", "SIGINT"] as const) {
+  process.on(sig, () => {
+    console.log(`[stats] ${sig} received, flushing stats…`);
+    persistStats().finally(() => process.exit(0));
+    setTimeout(() => process.exit(1), 3000);
+  });
+}
 
 // Load persisted stats at startup.
 (async () => {
