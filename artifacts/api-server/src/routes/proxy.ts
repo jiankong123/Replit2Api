@@ -924,10 +924,11 @@ async function handleFriendProxy({
   // ── Streaming ────────────────────────────────────────────────────────────
   // Immediately commit SSE headers so the client (SillyTavern, etc.) receives an
   // HTTP response right away and does NOT time out before the upstream responds.
-  // A keepalive comment is written every 3 s to prevent intermediate proxies or
-  // clients from closing the connection while waiting for the first real chunk.
+  // A keepalive comment is written every 15 s to prevent intermediate proxies from
+  // closing the connection during long generations (15 s is well within any 60 s
+  // proxy idle timeout while avoiding unnecessary bandwidth on fast upstreams).
   setSseHeaders(res);
-  const keepaliveTimer = setInterval(() => writeAndFlush(res, ": keep-alive\n\n"), 3000);
+  const keepaliveTimer = setInterval(() => writeAndFlush(res, ": keep-alive\n\n"), 15_000);
 
   let promptTokens = 0;
   let completionTokens = 0;
@@ -935,11 +936,13 @@ async function handleFriendProxy({
   let outputChars = 0;
 
   try {
+    // 10-minute absolute timeout for streaming — long enough for any realistic
+    // generation (5 000+ tokens) without leaving zombie connections open forever.
     const fetchRes = await fetch(`${backend.url}/v1/chat/completions`, {
       method: "POST",
       headers: { Authorization: `Bearer ${backend.apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120_000),
+      signal: AbortSignal.timeout(600_000),
     });
 
     if (!fetchRes.ok) {
