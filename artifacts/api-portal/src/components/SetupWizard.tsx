@@ -42,17 +42,23 @@ function buildSetupPrompt(
    PROXY_API_KEY = ${apiKey}`);
 
   if (opts.needIntegrations) {
-    steps.push(`步骤 ${++stepNum}：添加 Replit AI Integrations（通过左侧边栏 Integrations 面板）
-   【重要】这是 Replit 平台内置功能，完全不需要我提供任何第三方 API Key。
-   请直接在 Integrations 面板中操作，不要向我索取任何第三方 API Key。
-   - OpenAI Integration：在 Integrations 面板搜索 "OpenAI" 并添加。
-     添加后 Replit 平台会自动注入 AI_INTEGRATIONS_OPENAI_API_KEY 和 AI_INTEGRATIONS_OPENAI_BASE_URL，无需任何额外操作。
-   - Anthropic Integration：在 Integrations 面板搜索 "Anthropic" 并添加。
-     添加后 Replit 平台会自动注入 AI_INTEGRATIONS_ANTHROPIC_API_KEY 和 AI_INTEGRATIONS_ANTHROPIC_BASE_URL，无需任何额外操作。
-   - Gemini Integration：在 Integrations 面板搜索 "Gemini" 并添加。
-     添加后 Replit 平台会自动注入 AI_INTEGRATIONS_GEMINI_API_KEY 和 AI_INTEGRATIONS_GEMINI_BASE_URL，无需任何额外操作。
-   - OpenRouter Integration：在 Integrations 面板搜索 "OpenRouter" 并添加。
-     添加后 Replit 平台会自动注入 AI_INTEGRATIONS_OPENROUTER_API_KEY 和 AI_INTEGRATIONS_OPENROUTER_BASE_URL，无需任何额外操作。`);
+    steps.push(`步骤 ${++stepNum}：开通 Replit AI Integrations（四个 provider 全部需要）
+   【重要】这是 Replit 平台内置功能，完全不需要我提供任何第三方 API Key（OpenAI、Anthropic、Gemini、OpenRouter 均由平台免费提供）。
+   请在 code_execution 工具中依次执行以下四条命令（必须逐条顺序执行，等上一条完成再执行下一条）：
+
+   const r1 = await setupReplitAIIntegrations({ providerSlug: "openai", providerUrlEnvVarName: "AI_INTEGRATIONS_OPENAI_BASE_URL", providerApiKeyEnvVarName: "AI_INTEGRATIONS_OPENAI_API_KEY" });
+   console.log("OpenAI:", JSON.stringify(r1));
+
+   const r2 = await setupReplitAIIntegrations({ providerSlug: "anthropic", providerUrlEnvVarName: "AI_INTEGRATIONS_ANTHROPIC_BASE_URL", providerApiKeyEnvVarName: "AI_INTEGRATIONS_ANTHROPIC_API_KEY" });
+   console.log("Anthropic:", JSON.stringify(r2));
+
+   const r3 = await setupReplitAIIntegrations({ providerSlug: "gemini", providerUrlEnvVarName: "AI_INTEGRATIONS_GEMINI_BASE_URL", providerApiKeyEnvVarName: "AI_INTEGRATIONS_GEMINI_API_KEY" });
+   console.log("Gemini:", JSON.stringify(r3));
+
+   const r4 = await setupReplitAIIntegrations({ providerSlug: "openrouter", providerUrlEnvVarName: "AI_INTEGRATIONS_OPENROUTER_BASE_URL", providerApiKeyEnvVarName: "AI_INTEGRATIONS_OPENROUTER_API_KEY" });
+   console.log("OpenRouter:", JSON.stringify(r4));
+
+   四条全部成功后，环境变量会自动注入，无需手动操作。`);
   }
 
   if (opts.needStorage) {
@@ -67,7 +73,7 @@ function buildSetupPrompt(
 
   return `请帮我完成 Replit2Api 的初始配置，严格按以下步骤执行：
 
-【绝对禁止】不得向我索取 OpenAI API Key 或 Anthropic API Key，这两项由 Replit 平台通过 AI Integrations 自动提供，用户无需拥有也无需填写任何第三方密钥。
+【绝对禁止】不得向我索取 OpenAI、Anthropic、Gemini 或 OpenRouter 的 API Key，这四项全部由 Replit 平台通过 AI Integrations 自动提供，用户无需拥有也无需填写任何第三方密钥。
 
 ${steps.join("\n\n")}
 
