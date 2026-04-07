@@ -258,16 +258,6 @@ function PageHome({
         {(() => {
           const releases = [
             {
-              version: "v1.1.3",
-              date: "2026-04-07",
-              items: [
-                { zh: "配置助手自动检测：提交密码后先查询服务器状态，AI 集成和云端存储已就绪的步骤自动从指令中省略", en: "Setup wizard auto-detects: queries server status before generating prompt; skips AI Integrations and storage steps if already ready" },
-                { zh: "Remix / GitHub 导入零配置：Replit 平台自动注入 AI Integration 环境变量，大部分用户只需设密码一步即可完成配置", en: "Remix / GitHub-import zero-config: Replit auto-injects AI Integration env vars; most users only need to set a password" },
-                { zh: "动态提示词步骤编号：根据实际需要的步骤数自动编号，不再硬编码「三步」", en: "Dynamic step numbering in the Agent prompt based on what's actually needed" },
-                { zh: "检测失败且无密码时自动引导用户输入密码，而非显示空白指令", en: "When check fails and no key is set, wizard now guides user to enter a password first instead of showing a broken prompt" },
-              ],
-            },
-            {
               version: "v1.1.5",
               date: "2026-04-07",
               items: [
@@ -416,26 +406,10 @@ function PageHome({
             </div>
           );
 
-          const VISIBLE = 1;
-          const visible = releases.slice(0, VISIBLE);
-          const older = releases.slice(VISIBLE);
-
           return (
-            <>
-              {visible.map(renderRelease)}
-              {older.length > 0 && (
-                <>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px", margin: "4px 0 10px" }}>
-                    <div style={{ flex: 1, height: "1px", background: "rgba(255,255,255,0.05)" }} />
-                    <span style={{ fontSize: "10.5px", color: "#334155" }}>历史版本 ↓ 滚动查看</span>
-                    <div style={{ flex: 1, height: "1px", background: "rgba(255,255,255,0.05)" }} />
-                  </div>
-                  <div style={{ maxHeight: "200px", overflowY: "auto", paddingRight: "4px" }}>
-                    {older.map(renderRelease)}
-                  </div>
-                </>
-              )}
-            </>
+            <div style={{ maxHeight: "260px", overflowY: "auto", paddingRight: "4px" }}>
+              {releases.map(renderRelease)}
+            </div>
           );
         })()}
       </Card>
@@ -551,6 +525,7 @@ function PageStats({
   baseUrl, apiKey, stats, statsError, onRefresh,
   addUrl, setAddUrl, addState, addMsg, onAddBackend, onRemoveBackend,
   onToggleBackend, onBatchToggle, onBatchRemove,
+  routing, onToggleRouting,
 }: {
   baseUrl: string;
   apiKey: string;
@@ -566,6 +541,8 @@ function PageStats({
   onToggleBackend: (label: string, enabled: boolean) => void;
   onBatchToggle: (labels: string[], enabled: boolean) => void;
   onBatchRemove: (labels: string[]) => void;
+  routing: { localEnabled: boolean; localFallback: boolean };
+  onToggleRouting: (field: "localEnabled" | "localFallback", value: boolean) => void;
 }) {
   const _ = baseUrl; // used by parent
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -711,6 +688,46 @@ function PageStats({
           </>
         )}
       </Card>
+
+      {/* Routing Settings */}
+      {apiKey && (
+        <Card style={{ marginBottom: "14px" }}>
+          <SectionTitle>路由策略</SectionTitle>
+          <p style={{ margin: "0 0 12px", fontSize: "12px", color: "#475569" }}>控制本地账号（主号）的调用行为。子节点始终优先。</p>
+          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+            {([
+              { field: "localEnabled" as const, label: "启用本地账号", desc: "关闭后，本地账号完全停用，所有请求只走子节点" },
+              { field: "localFallback" as const, label: "主号兜底", desc: "关闭后，即使所有子节点离线也不会调用本地账号（返回 503）" },
+            ]).map(({ field, label, desc }) => (
+              <div key={field} style={{
+                display: "flex", alignItems: "center", justifyContent: "space-between",
+                background: "rgba(0,0,0,0.2)", border: "1px solid rgba(255,255,255,0.06)",
+                borderRadius: "8px", padding: "10px 14px",
+              }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: "13px", fontWeight: 600, color: "#94a3b8" }}>{label}</div>
+                  <div style={{ fontSize: "11px", color: "#475569", marginTop: "2px" }}>{desc}</div>
+                </div>
+                <button
+                  onClick={() => onToggleRouting(field, !routing[field])}
+                  style={{
+                    width: "40px", height: "22px", borderRadius: "11px", border: "none", cursor: "pointer",
+                    background: routing[field] ? "#6366f1" : "rgba(255,255,255,0.1)",
+                    position: "relative", transition: "background 0.2s", flexShrink: 0, marginLeft: "12px",
+                  }}
+                >
+                  <div style={{
+                    width: "16px", height: "16px", borderRadius: "50%", background: "#fff",
+                    position: "absolute", top: "3px",
+                    left: routing[field] ? "21px" : "3px",
+                    transition: "left 0.2s",
+                  }} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       {/* Add Node */}
       <Card>
@@ -1701,6 +1718,7 @@ export default function App() {
   });
   const [stats, setStats] = useState<Record<string, { calls: number; errors: number; promptTokens: number; completionTokens: number; totalTokens: number; avgDurationMs: number; avgTtftMs: number | null; health: string; url?: string; dynamic?: boolean; enabled?: boolean }> | null>(null);
   const [statsError, setStatsError] = useState<false | "auth" | "server">(false);
+  const [routing, setRouting] = useState<{ localEnabled: boolean; localFallback: boolean }>({ localEnabled: true, localFallback: true });
   const [addUrl, setAddUrl] = useState("");
   const [addState, setAddState] = useState<"idle" | "loading" | "ok" | "err">("idle");
   const [addMsg, setAddMsg] = useState("");
@@ -1752,6 +1770,7 @@ export default function App() {
       }
       const d = await r.json();
       setStats(d.stats); setStatsError(false);
+      if (d.routing) setRouting(d.routing);
     } catch { setStatsError("auth"); }
   }, [baseUrl]);
 
@@ -1798,6 +1817,17 @@ export default function App() {
       body: JSON.stringify({ labels, enabled }),
     });
     fetchStats(apiKey);
+  };
+
+  const toggleRouting = async (field: "localEnabled" | "localFallback", value: boolean) => {
+    setRouting((prev) => ({ ...prev, [field]: value }));
+    try {
+      await fetch(`${baseUrl}/api/v1/admin/routing`, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ [field]: value }),
+      });
+    } catch {}
   };
 
   const fetchModels = useCallback(async (key: string = apiKey) => {
@@ -2002,6 +2032,8 @@ export default function App() {
             onToggleBackend={toggleBackend}
             onBatchToggle={batchToggleBackends}
             onBatchRemove={batchRemoveBackends}
+            routing={routing}
+            onToggleRouting={toggleRouting}
           />
         )}
         {tab === "models" && (

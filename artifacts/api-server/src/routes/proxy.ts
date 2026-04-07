@@ -129,6 +129,18 @@ function saveDisabledModels(set: Set<string>): void {
   writeJson("disabled_models.json", [...set]).catch(() => {});
 }
 
+interface RoutingSettings { localEnabled: boolean; localFallback: boolean }
+let routingSettings: RoutingSettings = { localEnabled: true, localFallback: true };
+
+(async () => {
+  const saved = await readJson<RoutingSettings>("routing_settings.json");
+  if (saved && typeof saved.localEnabled === "boolean") routingSettings = saved;
+})();
+
+function saveRoutingSettings(): void {
+  writeJson("routing_settings.json", routingSettings).catch(() => {});
+}
+
 function isModelEnabled(id: string): boolean {
   return !disabledModels.has(id);
 }
@@ -235,13 +247,16 @@ function buildBackendPool(): Backend[] {
 
   if (friends.length > 0) return friends;
 
-  return [{ kind: "local" }];
+  if (routingSettings.localFallback && routingSettings.localEnabled) return [{ kind: "local" }];
+
+  return [];
 }
 
 let requestCounter = 0;
 
-function pickBackend(): Backend {
+function pickBackend(): Backend | null {
   const pool = buildBackendPool();
+  if (pool.length === 0) return null;
   const backend = pool[requestCounter % pool.length];
   requestCounter++;
   return backend;
@@ -252,7 +267,8 @@ function pickBackendExcluding(exclude: Set<string>): Backend | null {
     (b) => b.kind === "friend" && !exclude.has(b.url)
   );
   if (friends.length > 0) return friends[requestCounter % friends.length];
-  return { kind: "local" };
+  if (routingSettings.localFallback && routingSettings.localEnabled) return { kind: "local" };
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -621,6 +637,7 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
   const MAX_FRIEND_RETRIES = 3;
   const triedFriendUrls = new Set<string>();
   let backend = pickBackend();
+  if (!backend) { res.status(503).json({ error: { message: "No available backends — all sub-nodes are down and local fallback is disabled", type: "service_unavailable" } }); return; }
 
   for (let attempt = 0; ; attempt++) {
     const backendLabel = backend.kind === "local" ? "local" : backend.label;
@@ -816,7 +833,7 @@ router.get("/v1/stats", requireApiKey, (_req: Request, res: Response) => {
       enabled: cfg ? cfg.enabled : true,
     };
   }
-  res.json({ stats: result, uptimeSeconds: Math.round(process.uptime()) });
+  res.json({ stats: result, uptimeSeconds: Math.round(process.uptime()), routing: routingSettings });
 });
 
 // ---------------------------------------------------------------------------
@@ -892,6 +909,18 @@ router.patch("/v1/admin/backends", requireApiKey, (req: Request, res: Response) 
   }
   saveDynamicBackends(dynamicBackends);
   res.json({ updated, enabled });
+});
+
+router.get("/v1/admin/routing", requireApiKey, (_req: Request, res: Response) => {
+  res.json(routingSettings);
+});
+
+router.patch("/v1/admin/routing", requireApiKey, (req: Request, res: Response) => {
+  const { localEnabled, localFallback } = req.body as Partial<RoutingSettings>;
+  if (typeof localEnabled === "boolean") routingSettings.localEnabled = localEnabled;
+  if (typeof localFallback === "boolean") routingSettings.localFallback = localFallback;
+  saveRoutingSettings();
+  res.json(routingSettings);
 });
 
 // ---------------------------------------------------------------------------
