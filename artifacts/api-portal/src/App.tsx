@@ -1717,7 +1717,7 @@ export default function App() {
   const fetchStats = useCallback(async (key: string) => {
     if (!key) { setStats(null); setStatsError(false); return; }
     try {
-      const r = await fetch(`${baseUrl}/v1/stats`, { headers: { Authorization: `Bearer ${key}` } });
+      const r = await fetch(`${baseUrl}/api/v1/stats`, { headers: { Authorization: `Bearer ${key}` } });
       if (!r.ok) {
         setStatsError(r.status === 500 ? "server" : "auth");
         return;
@@ -1733,7 +1733,7 @@ export default function App() {
     if (!url) return;
     setAddState("loading");
     try {
-      const r = await fetch(`${baseUrl}/v1/admin/backends`, {
+      const r = await fetch(`${baseUrl}/api/v1/admin/backends`, {
         method: "POST",
         headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify({ url }),
@@ -1747,7 +1747,7 @@ export default function App() {
   };
 
   const removeBackend = async (label: string) => {
-    await fetch(`${baseUrl}/v1/admin/backends/${label}`, {
+    await fetch(`${baseUrl}/api/v1/admin/backends/${label}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${apiKey}` },
     });
@@ -1755,7 +1755,7 @@ export default function App() {
   };
 
   const toggleBackend = async (label: string, enabled: boolean) => {
-    await fetch(`${baseUrl}/v1/admin/backends/${label}`, {
+    await fetch(`${baseUrl}/api/v1/admin/backends/${label}`, {
       method: "PATCH",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({ enabled }),
@@ -1764,7 +1764,7 @@ export default function App() {
   };
 
   const batchToggleBackends = async (labels: string[], enabled: boolean) => {
-    await fetch(`${baseUrl}/v1/admin/backends`, {
+    await fetch(`${baseUrl}/api/v1/admin/backends`, {
       method: "PATCH",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({ labels, enabled }),
@@ -1775,7 +1775,7 @@ export default function App() {
   const fetchModels = useCallback(async (key: string = apiKey) => {
     if (!key) return;
     try {
-      const r = await fetch(`${baseUrl}/v1/admin/models`, { headers: { Authorization: `Bearer ${key}` } });
+      const r = await fetch(`${baseUrl}/api/v1/admin/models`, { headers: { Authorization: `Bearer ${key}` } });
       if (!r.ok) return;
       const d = await r.json();
       setModelStatus(d.models ?? []);
@@ -1792,7 +1792,7 @@ export default function App() {
       return { ...prev, [provider]: { total: grp.total, enabled: enabled ? grp.total : 0 } };
     });
     try {
-      await fetch(`${baseUrl}/v1/admin/models`, {
+      await fetch(`${baseUrl}/api/v1/admin/models`, {
         method: "PATCH",
         headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify({ provider, enabled }),
@@ -1813,7 +1813,7 @@ export default function App() {
       return { ...prev, [m.provider]: { total: grp.total, enabled: Math.max(0, Math.min(grp.total, grp.enabled + delta)) } };
     });
     try {
-      await fetch(`${baseUrl}/v1/admin/models`, {
+      await fetch(`${baseUrl}/api/v1/admin/models`, {
         method: "PATCH",
         headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify({ ids: [id], enabled }),
@@ -1824,7 +1824,7 @@ export default function App() {
 
   const batchRemoveBackends = async (labels: string[]) => {
     await Promise.all(labels.map((l) =>
-      fetch(`${baseUrl}/v1/admin/backends/${l}`, {
+      fetch(`${baseUrl}/api/v1/admin/backends/${l}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${apiKey}` },
       })

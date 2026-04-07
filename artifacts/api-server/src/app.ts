@@ -60,5 +60,6 @@ app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
 app.use("/api", router);
 app.use(proxyRouter);
+app.use("/api", proxyRouter);
 
 export default app;
