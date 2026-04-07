@@ -676,27 +676,56 @@ function PageStats({
 
             {/* ENV node via Replit Agent */}
             <div style={{ marginTop: "14px", borderTop: "1px solid rgba(255,255,255,0.05)", paddingTop: "14px" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
-                <div style={{ flex: 1, minWidth: "180px" }}>
-                  <div style={{ fontSize: "12.5px", color: "#94a3b8", fontWeight: 600, marginBottom: "3px" }}>通过环境变量添加（永久节点）</div>
-                  <div style={{ fontSize: "11.5px", color: "#475569", lineHeight: "1.5" }}>
-                    ENV 节点写入 Secrets，Publish 后不会丢失。复制提示词发给 Replit Agent 自动完成配置。
-                  </div>
-                </div>
-                <button
-                  onClick={copyEnvPrompt}
+              <div style={{ fontSize: "12.5px", color: "#94a3b8", fontWeight: 600, marginBottom: "6px" }}>
+                通过环境变量添加（永久节点）
+              </div>
+              <div style={{ fontSize: "11.5px", color: "#475569", lineHeight: "1.5", marginBottom: "8px" }}>
+                ENV 节点写入 Secrets，Publish 后不会丢失。将下方内容发给 Replit Agent 即可自动完成配置。
+              </div>
+              {/* Copyable prompt block */}
+              <div
+                style={{
+                  background: "rgba(0,0,0,0.35)",
+                  border: "1px solid rgba(99,102,241,0.3)",
+                  borderRadius: "8px",
+                  padding: "10px 12px",
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: "10px",
+                }}
+              >
+                <span
                   style={{
-                    display: "flex", alignItems: "center", gap: "6px",
-                    background: envPromptCopied ? "rgba(74,222,128,0.12)" : "rgba(99,102,241,0.1)",
-                    border: `1px solid ${envPromptCopied ? "rgba(74,222,128,0.4)" : "rgba(99,102,241,0.3)"}`,
-                    borderRadius: "8px", padding: "8px 16px",
-                    color: envPromptCopied ? "#4ade80" : "#a78bfa",
-                    fontSize: "13px", fontWeight: 600, cursor: "pointer",
-                    transition: "all 0.2s", flexShrink: 0,
+                    flex: 1,
+                    color: "#a5b4fc",
+                    fontSize: "12px",
+                    fontFamily: "Menlo, Consolas, monospace",
+                    lineHeight: "1.6",
+                    whiteSpace: "pre-wrap",
+                    userSelect: "all",
+                    wordBreak: "break-all",
                   }}
                 >
-                  <span style={{ fontSize: "14px" }}>{envPromptCopied ? "✓" : "📋"}</span>
-                  {envPromptCopied ? "已复制！" : "复制提示词"}
+                  {ENV_NODE_PROMPT}
+                </span>
+                <button
+                  onClick={copyEnvPrompt}
+                  title="复制"
+                  style={{
+                    flexShrink: 0,
+                    background: envPromptCopied ? "rgba(74,222,128,0.12)" : "rgba(99,102,241,0.1)",
+                    border: `1px solid ${envPromptCopied ? "rgba(74,222,128,0.4)" : "rgba(99,102,241,0.25)"}`,
+                    borderRadius: "6px",
+                    padding: "4px 10px",
+                    color: envPromptCopied ? "#4ade80" : "#a78bfa",
+                    fontSize: "12px",
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    transition: "all 0.2s",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {envPromptCopied ? "✓ 已复制" : "📋 复制"}
                 </button>
               </div>
             </div>
