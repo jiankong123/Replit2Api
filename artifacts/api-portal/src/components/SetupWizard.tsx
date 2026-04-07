@@ -43,12 +43,16 @@ function buildSetupPrompt(
 
   if (opts.needIntegrations) {
     steps.push(`步骤 ${++stepNum}：添加 Replit AI Integrations（通过左侧边栏 Integrations 面板）
-   【重要】这是 Replit 平台内置功能，完全不需要我提供 OpenAI 或 Anthropic 的 API Key。
+   【重要】这是 Replit 平台内置功能，完全不需要我提供任何第三方 API Key。
    请直接在 Integrations 面板中操作，不要向我索取任何第三方 API Key。
    - OpenAI Integration：在 Integrations 面板搜索 "OpenAI" 并添加。
      添加后 Replit 平台会自动注入 AI_INTEGRATIONS_OPENAI_API_KEY 和 AI_INTEGRATIONS_OPENAI_BASE_URL，无需任何额外操作。
    - Anthropic Integration：在 Integrations 面板搜索 "Anthropic" 并添加。
-     添加后 Replit 平台会自动注入 AI_INTEGRATIONS_ANTHROPIC_API_KEY 和 AI_INTEGRATIONS_ANTHROPIC_BASE_URL，无需任何额外操作。`);
+     添加后 Replit 平台会自动注入 AI_INTEGRATIONS_ANTHROPIC_API_KEY 和 AI_INTEGRATIONS_ANTHROPIC_BASE_URL，无需任何额外操作。
+   - Gemini Integration：在 Integrations 面板搜索 "Gemini" 并添加。
+     添加后 Replit 平台会自动注入 AI_INTEGRATIONS_GEMINI_API_KEY 和 AI_INTEGRATIONS_GEMINI_BASE_URL，无需任何额外操作。
+   - OpenRouter Integration：在 Integrations 面板搜索 "OpenRouter" 并添加。
+     添加后 Replit 平台会自动注入 AI_INTEGRATIONS_OPENROUTER_API_KEY 和 AI_INTEGRATIONS_OPENROUTER_BASE_URL，无需任何额外操作。`);
   }
 
   if (opts.needStorage) {

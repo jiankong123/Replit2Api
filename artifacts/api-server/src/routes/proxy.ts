@@ -1,6 +1,7 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenAI } from "@google/genai";
 import { readJson, writeJson } from "../lib/cloudPersist";
 import { getSillyTavernMode } from "./settings";
 
@@ -285,6 +286,28 @@ function makeLocalAnthropic(): Anthropic {
     );
   }
   return new Anthropic({ apiKey, baseURL });
+}
+
+function makeLocalGemini(): GoogleGenAI {
+  const apiKey = process.env.AI_INTEGRATIONS_GEMINI_API_KEY;
+  const baseUrl = process.env.AI_INTEGRATIONS_GEMINI_BASE_URL;
+  if (!apiKey || !baseUrl) {
+    throw new Error(
+      "Gemini integration is not configured. Please add the Gemini integration in Replit (Tools → Integrations) to use Gemini models."
+    );
+  }
+  return new GoogleGenAI({ apiKey, httpOptions: { apiVersion: "", baseUrl } });
+}
+
+function makeLocalOpenRouter(): OpenAI {
+  const apiKey = process.env.AI_INTEGRATIONS_OPENROUTER_API_KEY;
+  const baseURL = process.env.AI_INTEGRATIONS_OPENROUTER_BASE_URL;
+  if (!apiKey || !baseURL) {
+    throw new Error(
+      "OpenRouter integration is not configured. Please add the OpenRouter integration in Replit (Tools → Integrations) to use OpenRouter models."
+    );
+  }
+  return new OpenAI({ apiKey, baseURL });
 }
 
 
@@ -591,13 +614,13 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
   }
 
   const selectedModel = model && ALL_MODELS.some((m) => m.id === model) ? model : "gpt-5.2";
-  const isClaudeModel = ANTHROPIC_BASE_MODELS.some((base) =>
-    selectedModel === base || selectedModel.startsWith(`${base}-thinking`)
-  );
+  const provider = MODEL_PROVIDER_MAP.get(selectedModel) ?? "openai";
+  const isClaudeModel = provider === "anthropic";
+  const isGeminiModel = provider === "gemini";
+  const isOpenRouterModel = provider === "openrouter";
   const shouldStream = stream ?? false;
   const startTime = Date.now();
 
-  // SillyTavern 兼容模式：对 Claude 模型自动追加「继续」消息（仅无 tool calling 时）
   const finalMessages = (isClaudeModel && getSillyTavernMode() && !tools?.length)
     ? [...messages, { role: "user" as const, content: "继续" }]
     : messages;
@@ -635,6 +658,18 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
         const defaultMaxTokens = thinkingEnabled ? Math.max(modelMax, 32000) : modelMax;
         const client = makeLocalAnthropic();
         result = await handleClaude({ req, res, client, model: actualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens ?? defaultMaxTokens, thinking: thinkingEnabled, tools, toolChoice: tool_choice, startTime });
+      } else if (isGeminiModel) {
+        const thinkingVisible = selectedModel.endsWith("-thinking-visible");
+        const thinkingEnabled = thinkingVisible || selectedModel.endsWith("-thinking");
+        const actualModel = thinkingVisible
+          ? selectedModel.replace(/-thinking-visible$/, "")
+          : thinkingEnabled
+            ? selectedModel.replace(/-thinking$/, "")
+            : selectedModel;
+        result = await handleGemini({ req, res, model: actualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, thinking: thinkingEnabled, startTime });
+      } else if (isOpenRouterModel) {
+        const client = makeLocalOpenRouter();
+        result = await handleOpenAI({ req, res, client, model: selectedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime });
       } else {
         const client = makeLocalOpenAI();
         result = await handleOpenAI({ req, res, client, model: selectedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime });
@@ -1121,6 +1156,125 @@ async function handleOpenAI({
       promptTokens: result.usage?.prompt_tokens ?? 0,
       completionTokens: result.usage?.completion_tokens ?? 0,
     };
+  }
+}
+
+async function handleGemini({
+  req, res, model, messages, stream, maxTokens, thinking = false, startTime,
+}: {
+  req: Request;
+  res: Response;
+  model: string;
+  messages: OAIMessage[];
+  stream: boolean;
+  maxTokens?: number;
+  thinking?: boolean;
+  startTime: number;
+}): Promise<{ promptTokens: number; completionTokens: number; ttftMs?: number }> {
+  const client = makeLocalGemini();
+
+  let systemInstruction: string | undefined;
+  const contents: { role: string; parts: { text: string }[] }[] = [];
+
+  for (const msg of messages) {
+    const textContent = typeof msg.content === "string"
+      ? msg.content
+      : Array.isArray(msg.content)
+        ? msg.content.filter((p: OAIContentPart) => p.type === "text").map((p) => (p as { type: "text"; text: string }).text).join("\n")
+        : "";
+    if (msg.role === "system") {
+      systemInstruction = systemInstruction ? `${systemInstruction}\n${textContent}` : textContent;
+    } else {
+      contents.push({
+        role: msg.role === "assistant" ? "model" : "user",
+        parts: [{ text: textContent || " " }],
+      });
+    }
+  }
+
+  if (contents.length === 0) {
+    contents.push({ role: "user", parts: [{ text: " " }] });
+  }
+
+  const config: Record<string, unknown> = {};
+  if (maxTokens) config.maxOutputTokens = maxTokens;
+  if (thinking) {
+    config.thinkingConfig = { thinkingBudget: maxTokens ? Math.min(maxTokens, 32768) : 16384 };
+  }
+
+  if (stream) {
+    setSseHeaders(res);
+    let ttftMs: number | undefined;
+    let promptTokens = 0;
+    let completionTokens = 0;
+    const chatId = `chatcmpl-${Date.now()}`;
+
+    const response = await client.models.generateContentStream({
+      model,
+      contents,
+      config: {
+        ...config,
+        ...(systemInstruction ? { systemInstruction } : {}),
+      },
+    });
+
+    for await (const chunk of response) {
+      const text = chunk.text ?? "";
+      if (ttftMs === undefined && text) {
+        ttftMs = Date.now() - startTime;
+      }
+      if (chunk.usageMetadata) {
+        promptTokens = chunk.usageMetadata.promptTokenCount ?? 0;
+        completionTokens = chunk.usageMetadata.candidatesTokenCount ?? 0;
+      }
+      const oaiChunk = {
+        id: chatId,
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model,
+        choices: [{
+          index: 0,
+          delta: { content: text },
+          finish_reason: chunk.candidates?.[0]?.finishReason === "STOP" ? "stop" : null,
+        }],
+      };
+      writeAndFlush(res, `data: ${JSON.stringify(oaiChunk)}\n\n`);
+    }
+
+    writeAndFlush(res, "data: [DONE]\n\n");
+    res.end();
+    return { promptTokens, completionTokens, ttftMs };
+  } else {
+    const response = await client.models.generateContent({
+      model,
+      contents,
+      config: {
+        ...config,
+        ...(systemInstruction ? { systemInstruction } : {}),
+      },
+    });
+
+    const text = response.text ?? "";
+    const promptTokens = response.usageMetadata?.promptTokenCount ?? 0;
+    const completionTokens = response.usageMetadata?.candidatesTokenCount ?? 0;
+
+    res.json({
+      id: `chatcmpl-${Date.now()}`,
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: text },
+        finish_reason: "stop",
+      }],
+      usage: {
+        prompt_tokens: promptTokens,
+        completion_tokens: completionTokens,
+        total_tokens: promptTokens + completionTokens,
+      },
+    });
+    return { promptTokens, completionTokens };
   }
 }
 

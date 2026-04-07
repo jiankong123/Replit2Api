@@ -14,7 +14,11 @@ router.get("/setup-status", (_req, res) => {
     !!process.env.AI_INTEGRATIONS_OPENAI_API_KEY &&
     !!process.env.AI_INTEGRATIONS_OPENAI_BASE_URL &&
     !!process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY &&
-    !!process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL;
+    !!process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL &&
+    !!process.env.AI_INTEGRATIONS_GEMINI_API_KEY &&
+    !!process.env.AI_INTEGRATIONS_GEMINI_BASE_URL &&
+    !!process.env.AI_INTEGRATIONS_OPENROUTER_API_KEY &&
+    !!process.env.AI_INTEGRATIONS_OPENROUTER_BASE_URL;
   const storageReady = !!process.env.DEFAULT_OBJECT_STORAGE_BUCKET_ID;
   res.json({ configured, integrationsReady, storageReady });
 });
