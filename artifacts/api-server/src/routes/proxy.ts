@@ -431,6 +431,67 @@ function writeAndFlush(res: Response, data: string) {
   (res as unknown as { flush?: () => void }).flush?.();
 }
 
+async function fakeStreamResponse(
+  res: Response,
+  json: Record<string, unknown>,
+  startTime: number,
+): Promise<{ promptTokens: number; completionTokens: number; ttftMs: number }> {
+  const id = (json["id"] as string) ?? `chatcmpl-fake-${Date.now()}`;
+  const model = (json["model"] as string) ?? "unknown";
+  const created = (json["created"] as number) ?? Math.floor(Date.now() / 1000);
+  const choices = (json["choices"] as Array<Record<string, unknown>>) ?? [];
+  const usage = json["usage"] as { prompt_tokens?: number; completion_tokens?: number } | undefined;
+
+  setSseHeaders(res);
+
+  const roleChunk = {
+    id, object: "chat.completion.chunk", created, model,
+    choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }],
+  };
+  writeAndFlush(res, `data: ${JSON.stringify(roleChunk)}\n\n`);
+  const ttftMs = Date.now() - startTime;
+
+  const fullContent = (choices[0]?.["message"] as { content?: string })?.content ?? "";
+  const toolCalls = (choices[0]?.["message"] as { tool_calls?: unknown[] })?.tool_calls;
+
+  if (toolCalls && Array.isArray(toolCalls) && toolCalls.length > 0) {
+    const tcChunk = {
+      id, object: "chat.completion.chunk", created, model,
+      choices: [{ index: 0, delta: { tool_calls: toolCalls }, finish_reason: null }],
+    };
+    writeAndFlush(res, `data: ${JSON.stringify(tcChunk)}\n\n`);
+  }
+
+  const CHUNK_SIZE = 4;
+  for (let i = 0; i < fullContent.length; i += CHUNK_SIZE) {
+    const slice = fullContent.slice(i, i + CHUNK_SIZE);
+    const chunk = {
+      id, object: "chat.completion.chunk", created, model,
+      choices: [{ index: 0, delta: { content: slice }, finish_reason: null }],
+    };
+    writeAndFlush(res, `data: ${JSON.stringify(chunk)}\n\n`);
+    if (i + CHUNK_SIZE < fullContent.length) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  }
+
+  const finishReason = (choices[0]?.["finish_reason"] as string) ?? "stop";
+  const stopChunk = {
+    id, object: "chat.completion.chunk", created, model,
+    choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
+    ...(usage ? { usage } : {}),
+  };
+  writeAndFlush(res, `data: ${JSON.stringify(stopChunk)}\n\n`);
+  writeAndFlush(res, "data: [DONE]\n\n");
+  res.end();
+
+  return {
+    promptTokens: usage?.prompt_tokens ?? 0,
+    completionTokens: usage?.completion_tokens ?? 0,
+    ttftMs,
+  };
+}
+
 function requireApiKey(req: Request, res: Response, next: () => void) {
   const proxyKey = process.env.PROXY_API_KEY;
   if (!proxyKey) {
@@ -1008,8 +1069,7 @@ async function handleFriendProxy({
   if (tools?.length) body["tools"] = tools;
   if (toolChoice !== undefined) body["tool_choice"] = toolChoice;
 
-  // ── Non-streaming ────────────────────────────────────────────────────────
-  // Handled first so the streaming path below can return early with clear flow.
+  // ── Non-streaming (or fake-stream when client wants stream but we call non-stream) ──
   if (!stream) {
     const fetchRes = await fetch(`${backend.url}/v1/chat/completions`, {
       method: "POST",
@@ -1039,11 +1099,37 @@ async function handleFriendProxy({
   }
 
   // ── Streaming ────────────────────────────────────────────────────────────
-  // Immediately commit SSE headers so the client (SillyTavern, etc.) receives an
-  // HTTP response right away and does NOT time out before the upstream responds.
-  // A keepalive comment is written every 15 s to prevent intermediate proxies from
-  // closing the connection during long generations (15 s is well within any 60 s
-  // proxy idle timeout while avoiding unnecessary bandwidth on fast upstreams).
+  const fetchRes = await fetch(`${backend.url}/v1/chat/completions`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${backend.apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(600_000),
+  });
+
+  if (!fetchRes.ok) {
+    const errText = await fetchRes.text().catch(() => "unknown");
+    throw new FriendProxyHttpError(fetchRes.status, `Friend proxy error ${fetchRes.status}: ${errText}`);
+  }
+
+  const contentType = fetchRes.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    req.log.info("Friend returned JSON for stream request — fake-streaming");
+    const json = await fetchRes.json() as Record<string, unknown>;
+    const result = await fakeStreamResponse(res, json, startTime);
+    if (result.promptTokens === 0) {
+      const inputChars = messages.reduce((acc, m) => {
+        if (typeof m.content === "string") return acc + m.content.length;
+        if (Array.isArray(m.content))
+          return acc + (m.content as Array<{ type: string; text?: string }>)
+            .filter((p) => p.type === "text").reduce((a, p) => a + (p.text?.length ?? 0), 0);
+        return acc;
+      }, 0);
+      const outputContent = ((json["choices"] as Array<{ message?: { content?: string } }>)?.[0]?.message?.content ?? "").length;
+      return { promptTokens: Math.ceil(inputChars / 4), completionTokens: Math.ceil(outputContent / 4), ttftMs: result.ttftMs };
+    }
+    return result;
+  }
+
   setSseHeaders(res);
   const keepaliveTimer = setInterval(() => writeAndFlush(res, ": keep-alive\n\n"), 15_000);
 
@@ -1053,23 +1139,6 @@ async function handleFriendProxy({
   let outputChars = 0;
 
   try {
-    // 10-minute absolute timeout for streaming — long enough for any realistic
-    // generation (5 000+ tokens) without leaving zombie connections open forever.
-    const fetchRes = await fetch(`${backend.url}/v1/chat/completions`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${backend.apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(600_000),
-    });
-
-    if (!fetchRes.ok) {
-      const errText = await fetchRes.text().catch(() => "unknown");
-      // Headers already sent — report error inside the SSE stream then close.
-      writeAndFlush(res, `data: ${JSON.stringify({ error: { message: `Friend proxy error ${fetchRes.status}: ${errText}`, type: "server_error" } })}\n\n`);
-      writeAndFlush(res, "data: [DONE]\n\n");
-      res.end();
-      throw new FriendProxyHttpError(fetchRes.status, `Friend proxy error ${fetchRes.status}: ${errText}`);
-    }
 
     const reader = fetchRes.body!.getReader();
     const decoder = new TextDecoder();
@@ -1155,28 +1224,35 @@ async function handleOpenAI({
   if (toolChoice !== undefined) (params as Record<string, unknown>)["tool_choice"] = toolChoice;
 
   if (stream) {
-    setSseHeaders(res);
-    let ttftMs: number | undefined;
-    let promptTokens = 0;
-    let completionTokens = 0;
-    const streamResult = await client.chat.completions.create({
-      ...params,
-      stream: true,
-      stream_options: { include_usage: true },
-    });
-    for await (const chunk of streamResult) {
-      if (ttftMs === undefined && (chunk.choices?.[0]?.delta?.content || chunk.choices?.[0]?.delta?.tool_calls)) {
-        ttftMs = Date.now() - startTime;
+    try {
+      setSseHeaders(res);
+      let ttftMs: number | undefined;
+      let promptTokens = 0;
+      let completionTokens = 0;
+      const streamResult = await client.chat.completions.create({
+        ...params,
+        stream: true,
+        stream_options: { include_usage: true },
+      });
+      for await (const chunk of streamResult) {
+        if (ttftMs === undefined && (chunk.choices?.[0]?.delta?.content || chunk.choices?.[0]?.delta?.tool_calls)) {
+          ttftMs = Date.now() - startTime;
+        }
+        if (chunk.usage) {
+          promptTokens = chunk.usage.prompt_tokens ?? 0;
+          completionTokens = chunk.usage.completion_tokens ?? 0;
+        }
+        writeAndFlush(res, `data: ${JSON.stringify(chunk)}\n\n`);
       }
-      if (chunk.usage) {
-        promptTokens = chunk.usage.prompt_tokens ?? 0;
-        completionTokens = chunk.usage.completion_tokens ?? 0;
-      }
-      writeAndFlush(res, `data: ${JSON.stringify(chunk)}\n\n`);
+      writeAndFlush(res, "data: [DONE]\n\n");
+      res.end();
+      return { promptTokens, completionTokens, ttftMs };
+    } catch (streamErr) {
+      if (res.headersSent) throw streamErr;
+      req.log.warn({ err: streamErr }, "Real streaming failed, falling back to fake-stream");
+      const result = await client.chat.completions.create({ ...params, stream: false });
+      return fakeStreamResponse(res, result as unknown as Record<string, unknown>, startTime);
     }
-    writeAndFlush(res, "data: [DONE]\n\n");
-    res.end();
-    return { promptTokens, completionTokens, ttftMs };
   } else {
     const result = await client.chat.completions.create({ ...params, stream: false });
     res.json(result);
@@ -1231,47 +1307,66 @@ async function handleGemini({
   }
 
   if (stream) {
-    setSseHeaders(res);
-    let ttftMs: number | undefined;
-    let promptTokens = 0;
-    let completionTokens = 0;
-    const chatId = `chatcmpl-${Date.now()}`;
+    try {
+      setSseHeaders(res);
+      let ttftMs: number | undefined;
+      let promptTokens = 0;
+      let completionTokens = 0;
+      const chatId = `chatcmpl-${Date.now()}`;
 
-    const response = await client.models.generateContentStream({
-      model,
-      contents,
-      config: {
-        ...config,
-        ...(systemInstruction ? { systemInstruction } : {}),
-      },
-    });
-
-    for await (const chunk of response) {
-      const text = chunk.text ?? "";
-      if (ttftMs === undefined && text) {
-        ttftMs = Date.now() - startTime;
-      }
-      if (chunk.usageMetadata) {
-        promptTokens = chunk.usageMetadata.promptTokenCount ?? 0;
-        completionTokens = chunk.usageMetadata.candidatesTokenCount ?? 0;
-      }
-      const oaiChunk = {
-        id: chatId,
-        object: "chat.completion.chunk",
-        created: Math.floor(Date.now() / 1000),
+      const response = await client.models.generateContentStream({
         model,
-        choices: [{
-          index: 0,
-          delta: { content: text },
-          finish_reason: chunk.candidates?.[0]?.finishReason === "STOP" ? "stop" : null,
-        }],
-      };
-      writeAndFlush(res, `data: ${JSON.stringify(oaiChunk)}\n\n`);
-    }
+        contents,
+        config: {
+          ...config,
+          ...(systemInstruction ? { systemInstruction } : {}),
+        },
+      });
 
-    writeAndFlush(res, "data: [DONE]\n\n");
-    res.end();
-    return { promptTokens, completionTokens, ttftMs };
+      for await (const chunk of response) {
+        const text = chunk.text ?? "";
+        if (ttftMs === undefined && text) {
+          ttftMs = Date.now() - startTime;
+        }
+        if (chunk.usageMetadata) {
+          promptTokens = chunk.usageMetadata.promptTokenCount ?? 0;
+          completionTokens = chunk.usageMetadata.candidatesTokenCount ?? 0;
+        }
+        const oaiChunk = {
+          id: chatId,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          model,
+          choices: [{
+            index: 0,
+            delta: { content: text },
+            finish_reason: chunk.candidates?.[0]?.finishReason === "STOP" ? "stop" : null,
+          }],
+        };
+        writeAndFlush(res, `data: ${JSON.stringify(oaiChunk)}\n\n`);
+      }
+
+      writeAndFlush(res, "data: [DONE]\n\n");
+      res.end();
+      return { promptTokens, completionTokens, ttftMs };
+    } catch (streamErr) {
+      if (res.headersSent) throw streamErr;
+      req.log.warn({ err: streamErr }, "Gemini streaming failed, falling back to fake-stream");
+      const response = await client.models.generateContent({
+        model, contents,
+        config: { ...config, ...(systemInstruction ? { systemInstruction } : {}) },
+      });
+      const text = response.text ?? "";
+      const pTokens = response.usageMetadata?.promptTokenCount ?? 0;
+      const cTokens = response.usageMetadata?.candidatesTokenCount ?? 0;
+      const json = {
+        id: `chatcmpl-${Date.now()}`, object: "chat.completion",
+        created: Math.floor(Date.now() / 1000), model,
+        choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }],
+        usage: { prompt_tokens: pTokens, completion_tokens: cTokens, total_tokens: pTokens + cTokens },
+      };
+      return fakeStreamResponse(res, json as unknown as Record<string, unknown>, startTime);
+    }
   } else {
     const response = await client.models.generateContent({
       model,
