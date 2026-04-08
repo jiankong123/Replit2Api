@@ -1547,8 +1547,22 @@ async function handleClaude({
     }
 
   } else {
-    // Non-streaming
-    const result = await client.messages.create(buildCreateParams() as Parameters<typeof client.messages.create>[0]);
+    // Non-streaming — some models (e.g. claude-opus-4) require streaming;
+    // detect the error and transparently upgrade to stream + collect.
+    let result: Anthropic.Message;
+    try {
+      result = await client.messages.create(buildCreateParams() as Parameters<typeof client.messages.create>[0]);
+    } catch (nonStreamErr: unknown) {
+      const errMsg = nonStreamErr instanceof Error ? nonStreamErr.message : String(nonStreamErr);
+      if (/streaming.*required|requires.*stream/i.test(errMsg)) {
+        req.log.warn("Claude model requires streaming — upgrading to stream+collect for non-stream request");
+        const claudeStream = client.messages.stream(buildCreateParams() as Parameters<typeof client.messages.stream>[0]);
+        const collected = await claudeStream.finalMessage();
+        result = collected;
+      } else {
+        throw nonStreamErr;
+      }
+    }
 
     const textParts: string[] = [];
     const toolCalls: OAIToolCall[] = [];
