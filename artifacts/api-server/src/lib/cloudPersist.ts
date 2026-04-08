@@ -4,7 +4,7 @@
  * Cross-environment JSON persistence helper.
  *
  * - In production (when DEFAULT_OBJECT_STORAGE_BUCKET_ID is set): reads and
- *   writes JSON to GCS so data survives redeploys.
+ *   writes JSON to GCS via Replit sidecar auth so data survives redeploys.
  * - In local development (no bucket env var): falls back to the local
  *   filesystem so you can iterate without cloud credentials.
  *
@@ -22,9 +22,29 @@ const IS_PROD = !!process.env.REPLIT_DEPLOYMENT;
 const GCS_PREFIX = IS_PROD ? "config/" : "config_dev/";
 const LOCAL_DIR = IS_PROD ? "data_prod" : "data_dev";
 
+const REPLIT_SIDECAR_ENDPOINT = "http://127.0.0.1:1106";
+
 let _storage: Storage | null = null;
 function getStorage(): Storage {
-  if (!_storage) _storage = new Storage();
+  if (!_storage) {
+    _storage = new Storage({
+      credentials: {
+        audience: "replit",
+        subject_token_type: "access_token",
+        token_url: `${REPLIT_SIDECAR_ENDPOINT}/token`,
+        type: "external_account",
+        credential_source: {
+          url: `${REPLIT_SIDECAR_ENDPOINT}/credential`,
+          format: {
+            type: "json",
+            subject_token_field_name: "access_token",
+          },
+        },
+        universe_domain: "googleapis.com",
+      } as unknown as { client_email: string; private_key: string },
+      projectId: "",
+    });
+  }
   return _storage;
 }
 
