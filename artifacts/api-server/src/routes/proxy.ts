@@ -1014,7 +1014,7 @@ router.get("/v1/admin/logs/stream", requireApiKeyWithQuery, (req: Request, res: 
   logSSEClients.add(res);
   const heartbeat = setInterval(() => {
     if (!res.writableEnded) res.write(": heartbeat\n\n");
-  }, 15000);
+  }, 20000);
   req.on("close", () => { clearInterval(heartbeat); logSSEClients.delete(res); });
 });
 
