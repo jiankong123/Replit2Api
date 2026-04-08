@@ -31,18 +31,35 @@ export default function PageLogs({ baseUrl, apiKey }: { baseUrl: string; apiKey:
   const [autoScroll, setAutoScroll] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   const esRef = useRef<EventSource | null>(null);
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryCount = useRef(0);
+  const unmounted = useRef(false);
+
+  const cleanup = useCallback(() => {
+    if (reconnectTimer.current) { clearTimeout(reconnectTimer.current); reconnectTimer.current = null; }
+    if (esRef.current) { esRef.current.close(); esRef.current = null; }
+  }, []);
 
   const connect = useCallback(() => {
-    if (!apiKey) return;
+    if (!apiKey || unmounted.current) return;
+    cleanup();
+
     fetch(`${baseUrl}/api/v1/admin/logs`, { headers: { Authorization: `Bearer ${apiKey}` } })
       .then((r) => r.json())
-      .then((d) => { if (d.logs) setLogs(d.logs); })
+      .then((d) => { if (d.logs && !unmounted.current) setLogs(d.logs); })
       .catch(() => {});
 
     const es = new EventSource(`${baseUrl}/api/v1/admin/logs/stream?key=${apiKey}`);
     esRef.current = es;
-    es.onopen = () => setConnected(true);
+
+    es.onopen = () => {
+      if (unmounted.current) return;
+      retryCount.current = 0;
+      setConnected(true);
+    };
+
     es.onmessage = (e) => {
+      if (unmounted.current) return;
       try {
         const entry = JSON.parse(e.data) as LogEntry;
         setLogs((prev) => {
@@ -51,14 +68,30 @@ export default function PageLogs({ baseUrl, apiKey }: { baseUrl: string; apiKey:
         });
       } catch {}
     };
-    es.onerror = () => { setConnected(false); es.close(); };
-    return () => { es.close(); setConnected(false); };
-  }, [baseUrl, apiKey]);
+
+    es.onerror = () => {
+      if (unmounted.current) return;
+      setConnected(false);
+      es.close();
+      esRef.current = null;
+
+      const delay = Math.min(2000 * Math.pow(2, retryCount.current), 30000);
+      retryCount.current++;
+      reconnectTimer.current = setTimeout(() => {
+        if (!unmounted.current) connect();
+      }, delay);
+    };
+  }, [baseUrl, apiKey, cleanup]);
 
   useEffect(() => {
-    const cleanup = connect();
-    return cleanup;
-  }, [connect]);
+    unmounted.current = false;
+    connect();
+    return () => {
+      unmounted.current = true;
+      cleanup();
+      setConnected(false);
+    };
+  }, [connect, cleanup]);
 
   useEffect(() => {
     if (autoScroll && scrollRef.current) {
@@ -101,14 +134,14 @@ export default function PageLogs({ baseUrl, apiKey }: { baseUrl: string; apiKey:
             boxShadow: connected ? "0 0 8px #22c55e" : "none",
           }} />
           <span style={{ fontSize: "13px", color: connected ? "#22c55e" : "#ef4444" }}>
-            {connected ? "已连接" : "未连接"}
+            {connected ? "已连接" : "重连中..."}
           </span>
           {!connected && (
-            <button onClick={connect} style={{
+            <button onClick={() => { retryCount.current = 0; connect(); }} style={{
               fontSize: "12px", padding: "4px 10px", borderRadius: "6px",
               background: "rgba(99,102,241,0.2)", color: "#a5b4fc",
               border: "1px solid rgba(99,102,241,0.3)", cursor: "pointer",
-            }}>重连</button>
+            }}>立即重连</button>
           )}
         </div>
 
@@ -159,7 +192,7 @@ export default function PageLogs({ baseUrl, apiKey }: { baseUrl: string; apiKey:
       >
         {filtered.length === 0 && (
           <div style={{ textAlign: "center", color: "#475569", padding: "40px 0" }}>
-            {connected ? "等待日志输入..." : "点击「重连」开始接收实时日志"}
+            {connected ? "等待日志输入..." : "正在尝试连接服务器..."}
           </div>
         )}
         {filtered.map((l) => (
