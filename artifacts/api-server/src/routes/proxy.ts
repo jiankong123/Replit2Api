@@ -347,17 +347,31 @@ interface BackendStat {
   streamingCalls: number;
 }
 
+interface ModelStat {
+  calls: number;
+  promptTokens: number;
+  completionTokens: number;
+}
+
 const EMPTY_STAT = (): BackendStat => ({
   calls: 0, errors: 0, promptTokens: 0, completionTokens: 0,
   totalDurationMs: 0, totalTtftMs: 0, streamingCalls: 0,
 });
 
+const EMPTY_MODEL_STAT = (): ModelStat => ({
+  calls: 0, promptTokens: 0, completionTokens: 0,
+});
+
 const statsMap = new Map<string, BackendStat>();
+const modelStatsMap = new Map<string, ModelStat>();
 
 // ── Persistence helpers ────────────────────────────────────────────────────
 
-function statsToObject(): Record<string, BackendStat> {
-  return Object.fromEntries(statsMap.entries());
+function statsToObject(): { backends: Record<string, BackendStat>; models: Record<string, ModelStat> } {
+  return {
+    backends: Object.fromEntries(statsMap.entries()),
+    models: Object.fromEntries(modelStatsMap.entries()),
+  };
 }
 
 async function persistStats(): Promise<void> {
@@ -382,22 +396,38 @@ for (const sig of ["SIGTERM", "SIGINT"] as const) {
 
 export const statsReady: Promise<void> = (async () => {
   try {
-    const saved = await readJson<Record<string, BackendStat>>(STATS_FILE);
+    const saved = await readJson<Record<string, unknown>>(STATS_FILE);
     if (saved && typeof saved === "object") {
-      for (const [label, raw] of Object.entries(saved)) {
-        if (raw && typeof raw === "object") {
+      const backendsRaw = (saved as { backends?: Record<string, BackendStat> }).backends ?? saved as Record<string, BackendStat>;
+      const modelsRaw = (saved as { models?: Record<string, ModelStat> }).models;
+
+      for (const [label, raw] of Object.entries(backendsRaw)) {
+        if (raw && typeof raw === "object" && "calls" in (raw as Record<string, unknown>)) {
           statsMap.set(label, {
-            calls:            Number(raw.calls)            || 0,
-            errors:           Number(raw.errors)           || 0,
-            promptTokens:     Number(raw.promptTokens)     || 0,
-            completionTokens: Number(raw.completionTokens) || 0,
-            totalDurationMs:  Number(raw.totalDurationMs)  || 0,
-            totalTtftMs:      Number(raw.totalTtftMs)      || 0,
-            streamingCalls:   Number(raw.streamingCalls)   || 0,
+            calls:            Number((raw as BackendStat).calls)            || 0,
+            errors:           Number((raw as BackendStat).errors)           || 0,
+            promptTokens:     Number((raw as BackendStat).promptTokens)     || 0,
+            completionTokens: Number((raw as BackendStat).completionTokens) || 0,
+            totalDurationMs:  Number((raw as BackendStat).totalDurationMs)  || 0,
+            totalTtftMs:      Number((raw as BackendStat).totalTtftMs)      || 0,
+            streamingCalls:   Number((raw as BackendStat).streamingCalls)   || 0,
           });
         }
       }
-      console.log(`[stats] loaded ${statsMap.size} backend(s) from ${STATS_FILE}`);
+
+      if (modelsRaw && typeof modelsRaw === "object") {
+        for (const [model, raw] of Object.entries(modelsRaw)) {
+          if (raw && typeof raw === "object") {
+            modelStatsMap.set(model, {
+              calls:            Number(raw.calls)            || 0,
+              promptTokens:     Number(raw.promptTokens)     || 0,
+              completionTokens: Number(raw.completionTokens) || 0,
+            });
+          }
+        }
+      }
+
+      console.log(`[stats] loaded ${statsMap.size} backend(s), ${modelStatsMap.size} model(s) from ${STATS_FILE}`);
     }
   } catch {
     console.warn(`[stats] could not load ${STATS_FILE}, starting fresh`);
@@ -411,14 +441,25 @@ function getStat(label: string): BackendStat {
   return statsMap.get(label)!;
 }
 
-function recordCallStat(label: string, durationMs: number, prompt: number, completion: number, ttftMs?: number): void {
+function recordCallStat(label: string, durationMs: number, prompt: number, completion: number, ttftMs?: number, model?: string): void {
   const s = getStat(label);
   s.calls++;
   s.promptTokens += prompt;
   s.completionTokens += completion;
   s.totalDurationMs += durationMs;
   if (ttftMs !== undefined) { s.totalTtftMs += ttftMs; s.streamingCalls++; }
+  if (model) {
+    const ms = getModelStat(model);
+    ms.calls++;
+    ms.promptTokens += prompt;
+    ms.completionTokens += completion;
+  }
   scheduleSave();
+}
+
+function getModelStat(model: string): ModelStat {
+  if (!modelStatsMap.has(model)) modelStatsMap.set(model, EMPTY_MODEL_STAT());
+  return modelStatsMap.get(model)!;
 }
 
 function recordErrorStat(label: string): void { getStat(label).errors++; scheduleSave(); }
@@ -509,8 +550,6 @@ function requireApiKey(req: Request, res: Response, next: () => void) {
     return;
   }
 
-  // Accept: Authorization: Bearer <key>  (OpenAI-style)
-  //         x-api-key: <key>             (Anthropic-style)
   const authHeader = req.headers["authorization"];
   const xApiKey = req.headers["x-api-key"];
 
@@ -530,6 +569,14 @@ function requireApiKey(req: Request, res: Response, next: () => void) {
     return;
   }
   next();
+}
+
+function requireApiKeyWithQuery(req: Request, res: Response, next: () => void) {
+  const queryKey = req.query["key"] as string | undefined;
+  if (queryKey) {
+    req.headers["authorization"] = `Bearer ${queryKey}`;
+  }
+  requireApiKey(req, res, next);
 }
 
 // ---------------------------------------------------------------------------
@@ -762,7 +809,14 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
       }
       // ✅ Success — record stats, mark friend healthy, and exit retry loop
       if (backend.kind === "friend") setHealth(backend.url, true);
-      recordCallStat(backendLabel, Date.now() - startTime, result.promptTokens, result.completionTokens, result.ttftMs);
+      const duration = Date.now() - startTime;
+      recordCallStat(backendLabel, duration, result.promptTokens, result.completionTokens, result.ttftMs, selectedModel);
+      pushRequestLog({
+        method: req.method, path: req.path, model: selectedModel,
+        backend: backendLabel, status: 200, duration, stream: shouldStream,
+        promptTokens: result.promptTokens, completionTokens: result.completionTokens,
+        level: "info",
+      });
       break;
     } catch (err: unknown) {
       // ❌ Failure — record error, decide whether to retry on a different node
@@ -788,16 +842,20 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
       }
 
       req.log.error({ err }, "Proxy request failed");
+      const errStatus = (err instanceof FriendProxyHttpError ? err.status : undefined) ?? 500;
+      pushRequestLog({
+        method: req.method, path: req.path, model: selectedModel,
+        backend: backendLabel, status: errStatus, duration: Date.now() - startTime,
+        stream: shouldStream, level: errStatus >= 500 ? "error" : "warn",
+        error: errMsg || "Unknown error",
+      });
       if (!res.headersSent) {
-        // No response started yet — send a plain HTTP 500
         res.status(500).json({ error: { message: errMsg || "Unknown error", type: "server_error" } });
       } else if (!res.writableEnded) {
-        // SSE headers sent but stream not yet closed (e.g. network error mid-stream)
         writeAndFlush(res, `data: ${JSON.stringify({ error: { message: errMsg || "Unknown error" } })}\n\n`);
         writeAndFlush(res, "data: [DONE]\n\n");
         res.end();
       }
-      // else: response already fully ended (handleFriendProxy closed it) — nothing to do
       break;
     }
   }
@@ -866,26 +924,98 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
         }
         writeAndFlush(res, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
         res.end();
-        recordCallStat("local", Date.now() - startTime, inputTokens, outputTokens);
+        const dur = Date.now() - startTime;
+        recordCallStat("local", dur, inputTokens, outputTokens, undefined, selectedModel);
+        pushRequestLog({
+          method: req.method, path: req.path, model: selectedModel,
+          backend: "local", status: 200, duration: dur, stream: true,
+          promptTokens: inputTokens, completionTokens: outputTokens, level: "info",
+        });
       } finally {
         clearInterval(keepalive);
       }
     } else {
       const result = await client.messages.create(createParams);
       const usage = (result as { usage?: { input_tokens?: number; output_tokens?: number } }).usage ?? {};
-      recordCallStat("local", Date.now() - startTime, usage.input_tokens ?? 0, usage.output_tokens ?? 0);
+      const dur = Date.now() - startTime;
+      recordCallStat("local", dur, usage.input_tokens ?? 0, usage.output_tokens ?? 0, undefined, selectedModel);
+      pushRequestLog({
+        method: req.method, path: req.path, model: selectedModel,
+        backend: "local", status: 200, duration: dur, stream: false,
+        promptTokens: usage.input_tokens ?? 0, completionTokens: usage.output_tokens ?? 0, level: "info",
+      });
       res.json(result);
     }
   } catch (err: unknown) {
     recordErrorStat("local");
+    const errMsg = err instanceof Error ? err.message : "Unknown error";
     req.log.error({ err }, "/v1/messages request failed");
+    pushRequestLog({
+      method: req.method, path: req.path, model: selectedModel,
+      backend: "local", status: 500, duration: Date.now() - startTime,
+      stream: shouldStream, level: "error", error: errMsg,
+    });
     if (!res.headersSent) {
-      res.status(500).json({ error: { type: "server_error", message: err instanceof Error ? err.message : "Unknown error" } });
+      res.status(500).json({ error: { type: "server_error", message: errMsg } });
     } else {
-      writeAndFlush(res, `event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "server_error", message: err instanceof Error ? err.message : "Unknown error" } })}\n\n`);
+      writeAndFlush(res, `event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "server_error", message: errMsg } })}\n\n`);
       res.end();
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// Real-time request log ring buffer + SSE
+// ---------------------------------------------------------------------------
+
+interface RequestLog {
+  id: number;
+  time: string;
+  method: string;
+  path: string;
+  model?: string;
+  backend?: string;
+  status: number;
+  duration: number;
+  stream: boolean;
+  promptTokens?: number;
+  completionTokens?: number;
+  level: "info" | "warn" | "error";
+  error?: string;
+}
+
+const REQUEST_LOG_MAX = 200;
+const requestLogs: RequestLog[] = [];
+let logIdCounter = 0;
+const logSSEClients: Set<Response> = new Set();
+
+export function pushRequestLog(entry: Omit<RequestLog, "id" | "time">): void {
+  const log: RequestLog = { id: ++logIdCounter, time: new Date().toISOString(), ...entry };
+  requestLogs.push(log);
+  if (requestLogs.length > REQUEST_LOG_MAX) requestLogs.shift();
+  const data = `data: ${JSON.stringify(log)}\n\n`;
+  for (const client of logSSEClients) {
+    try { client.write(data); } catch { logSSEClients.delete(client); }
+  }
+}
+
+router.get("/v1/admin/logs", requireApiKey, (_req: Request, res: Response) => {
+  res.json({ logs: requestLogs });
+});
+
+router.get("/v1/admin/logs/stream", requireApiKeyWithQuery, (req: Request, res: Response) => {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  res.write(": connected\n\n");
+  logSSEClients.add(res);
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded) res.write(": heartbeat\n\n");
+  }, 15000);
+  req.on("close", () => { clearInterval(heartbeat); logSSEClients.delete(res); });
 });
 
 router.get("/v1/stats", requireApiKey, (_req: Request, res: Response) => {
@@ -898,6 +1028,7 @@ router.get("/v1/stats", requireApiKey, (_req: Request, res: Response) => {
     result[label] = {
       calls: s.calls,
       errors: s.errors,
+      streamingCalls: s.streamingCalls,
       promptTokens: s.promptTokens,
       completionTokens: s.completionTokens,
       totalTokens: s.promptTokens + s.completionTokens,
@@ -909,7 +1040,15 @@ router.get("/v1/stats", requireApiKey, (_req: Request, res: Response) => {
       enabled: cfg ? cfg.enabled : true,
     };
   }
-  res.json({ stats: result, uptimeSeconds: Math.round(process.uptime()), routing: routingSettings });
+  const modelStats: Record<string, ModelStat> = Object.fromEntries(modelStatsMap.entries());
+  res.json({ stats: result, modelStats, uptimeSeconds: Math.round(process.uptime()), routing: routingSettings });
+});
+
+router.post("/v1/admin/stats/reset", requireApiKey, (_req: Request, res: Response) => {
+  statsMap.clear();
+  modelStatsMap.clear();
+  scheduleSave();
+  res.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------

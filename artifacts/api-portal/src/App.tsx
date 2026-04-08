@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 import SetupWizard from "./components/SetupWizard";
 import UpdateBadge from "./components/UpdateBadge";
+import PageLogs from "./components/PageLogs";
+import PageDocs from "./components/PageDocs";
 
 // ---------------------------------------------------------------------------
 // Model registry
@@ -257,6 +259,17 @@ function PageHome({
         </div>
         {(() => {
           const releases = [
+            {
+              version: "v1.1.7",
+              date: "2026-04-08",
+              items: [
+                { zh: "按模型定价：预估开销改为根据每个模型的官方价格（输入/输出分别定价）精确计算，涵盖 47 个模型", en: "Per-model pricing: cost estimation now uses official per-model input/output rates for 47 models across all 4 providers" },
+                { zh: "按模型统计：后端新增 per-model token 统计（调用次数 / 输入 / 输出 token），持久化到 usage_stats.json", en: "Per-model stats: backend now tracks calls, prompt tokens, and completion tokens per model; persisted to usage_stats.json" },
+                { zh: "「按模型开销」卡片：统计面板第 6 格改为按模型维度展示费用排行，显示每个模型的调用次数和精确费用", en: "Per-model cost card: 6th summary card now shows cost breakdown by model (sorted by cost desc) with call count and precise cost" },
+                { zh: "定价覆盖：OpenAI GPT-5/4.1/4o/o-series、Anthropic Claude Opus/Sonnet/Haiku 4.x/3.x、Gemini 3.1/3/2.5/2.0/1.5、OpenRouter Grok/Llama/DeepSeek/Mistral/Qwen 等全部覆盖", en: "Pricing coverage: OpenAI GPT-5/4.1/4o/o-series, Anthropic Claude 4.x/3.x, Gemini 3.1–1.5, OpenRouter Grok/Llama/DeepSeek/Mistral/Qwen and more" },
+                { zh: "模型名智能匹配：自动剥离 provider 前缀（anthropic/、x-ai/ 等）和后缀（-thinking、-preview、日期戳），确保定价命中率", en: "Smart model name matching: strips provider prefixes and suffixes (-thinking, -preview, date stamps) for reliable pricing lookup" },
+              ],
+            },
             {
               version: "v1.1.6",
               date: "2026-04-08",
@@ -529,13 +542,87 @@ function PageHome({
   );
 }
 
-type BackendStat = { calls: number; errors: number; promptTokens: number; completionTokens: number; totalTokens: number; avgDurationMs: number; avgTtftMs: number | null; health: string; url?: string; dynamic?: boolean; enabled?: boolean };
+type BackendStat = { calls: number; errors: number; streamingCalls: number; promptTokens: number; completionTokens: number; totalTokens: number; avgDurationMs: number; avgTtftMs: number | null; health: string; url?: string; dynamic?: boolean; enabled?: boolean };
+type ModelStat = { calls: number; promptTokens: number; completionTokens: number };
+
+const MODEL_PRICING: Record<string, { input: number; output: number }> = {
+  "gpt-5.2": { input: 2.5, output: 10 },
+  "gpt-5.1": { input: 2.5, output: 10 },
+  "gpt-5": { input: 2.5, output: 10 },
+  "gpt-5-mini": { input: 0.15, output: 0.6 },
+  "gpt-5-nano": { input: 0.075, output: 0.3 },
+  "gpt-4.1": { input: 2, output: 8 },
+  "gpt-4.1-mini": { input: 0.4, output: 1.6 },
+  "gpt-4.1-nano": { input: 0.1, output: 0.4 },
+  "gpt-4o": { input: 2.5, output: 10 },
+  "gpt-4o-mini": { input: 0.15, output: 0.6 },
+  "gpt-4-turbo": { input: 10, output: 30 },
+  "gpt-4": { input: 30, output: 60 },
+  "gpt-3.5-turbo": { input: 0.5, output: 1.5 },
+  "o4-mini": { input: 1.1, output: 4.4 },
+  "o3": { input: 10, output: 40 },
+  "o3-mini": { input: 1.1, output: 4.4 },
+  "o1": { input: 15, output: 60 },
+  "o1-mini": { input: 3, output: 12 },
+  "o1-pro": { input: 150, output: 600 },
+  "claude-opus-4-6": { input: 15, output: 75 },
+  "claude-opus-4-5": { input: 15, output: 75 },
+  "claude-opus-4-1": { input: 15, output: 75 },
+  "claude-sonnet-4-6": { input: 3, output: 15 },
+  "claude-sonnet-4-5": { input: 3, output: 15 },
+  "claude-haiku-4-5": { input: 0.8, output: 4 },
+  "claude-3-7-sonnet": { input: 3, output: 15 },
+  "claude-3-5-sonnet": { input: 3, output: 15 },
+  "claude-3-5-haiku": { input: 0.8, output: 4 },
+  "claude-3-opus": { input: 15, output: 75 },
+  "claude-3-sonnet": { input: 3, output: 15 },
+  "claude-3-haiku": { input: 0.25, output: 1.25 },
+  "gemini-3.1-pro": { input: 1.25, output: 10 },
+  "gemini-3-flash": { input: 0.15, output: 0.6 },
+  "gemini-2.5-pro": { input: 1.25, output: 10 },
+  "gemini-2.5-flash": { input: 0.15, output: 0.6 },
+  "gemini-2.0-flash": { input: 0.1, output: 0.4 },
+  "gemini-2.0-flash-lite": { input: 0.075, output: 0.3 },
+  "gemini-1.5-pro": { input: 1.25, output: 5 },
+  "gemini-1.5-flash": { input: 0.075, output: 0.3 },
+  "gemini-1.5-flash-8b": { input: 0.0375, output: 0.15 },
+  "grok-4": { input: 3, output: 15 },
+  "grok-4.1": { input: 3, output: 15 },
+  "grok-4.20": { input: 3, output: 15 },
+  "llama-4": { input: 0.2, output: 0.8 },
+  "deepseek-v3": { input: 0.27, output: 1.1 },
+  "deepseek-r1": { input: 0.55, output: 2.19 },
+  "mistral-small": { input: 0.1, output: 0.3 },
+  "qwen3": { input: 0.3, output: 1.2 },
+  "command-a": { input: 2.5, output: 10 },
+  "nova-premier": { input: 2.5, output: 10 },
+  "ernie-4.5": { input: 1, output: 4 },
+};
+
+const DEFAULT_PRICING = { input: 3, output: 15 };
+
+function getModelPrice(model: string): { input: number; output: number } {
+  if (MODEL_PRICING[model]) return MODEL_PRICING[model];
+  const stripped = model.replace(/^[a-z0-9_-]+\//, "");
+  if (MODEL_PRICING[stripped]) return MODEL_PRICING[stripped];
+  const base = stripped.replace(/-(thinking-visible|thinking|latest|preview)$/g, "").replace(/-\d{4}-\d{2}-\d{2}$/, "");
+  if (MODEL_PRICING[base]) return MODEL_PRICING[base];
+  for (const [key, val] of Object.entries(MODEL_PRICING)) {
+    if (stripped.startsWith(key) || base.startsWith(key)) return val;
+  }
+  return DEFAULT_PRICING;
+}
+
+function estimateModelCost(model: string, prompt: number, completion: number): number {
+  const p = getModelPrice(model);
+  return (prompt * p.input + completion * p.output) / 1_000_000;
+}
 
 function PageStats({
   baseUrl, apiKey, stats, statsError, onRefresh,
   addUrl, setAddUrl, addState, addMsg, onAddBackend, onRemoveBackend,
   onToggleBackend, onBatchToggle, onBatchRemove,
-  routing, onToggleRouting,
+  routing, onToggleRouting, modelStats,
 }: {
   baseUrl: string;
   apiKey: string;
@@ -553,10 +640,11 @@ function PageStats({
   onBatchRemove: (labels: string[]) => void;
   routing: { localEnabled: boolean; localFallback: boolean; fakeStream: boolean };
   onToggleRouting: (field: "localEnabled" | "localFallback" | "fakeStream", value: boolean) => void;
+  modelStats: Record<string, ModelStat> | null;
 }) {
-  const _ = baseUrl; // used by parent
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [envPromptCopied, setEnvPromptCopied] = useState(false);
+  const [resetting, setResetting] = useState(false);
 
   const ENV_NODE_PROMPT =
     `请在当前 Replit 项目中添加一个环境变量，将子节点注册为永久 ENV 节点（Publish 后不会丢失）：\n\n` +
@@ -579,7 +667,15 @@ function PageStats({
     });
   };
 
-  // All sub-nodes (everything except "local")
+  const resetStats = () => {
+    setResetting(true);
+    fetch(`${baseUrl}/api/v1/admin/stats/reset`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+    }).then(() => { onRefresh(); setResetting(false); })
+      .catch(() => setResetting(false));
+  };
+
   const allSubNodes = stats
     ? Object.entries(stats).filter(([l]) => l !== "local")
     : [];
@@ -594,110 +690,302 @@ function PageStats({
   const toggleSelectAll = () =>
     setSelected(allSelected ? new Set() : new Set(allSubNodes.map(([l]) => l)));
 
+  const fmt = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}K` : n.toString();
+
+  const totalModelCost = modelStats
+    ? Object.entries(modelStats).reduce((sum, [model, ms]) => sum + estimateModelCost(model, ms.promptTokens, ms.completionTokens), 0)
+    : null;
+
+  const totalModelInputCost = modelStats
+    ? Object.entries(modelStats).reduce((sum, [model, ms]) => sum + (ms.promptTokens * getModelPrice(model).input) / 1_000_000, 0)
+    : null;
+
+  const totalModelOutputCost = modelStats
+    ? Object.entries(modelStats).reduce((sum, [model, ms]) => sum + (ms.completionTokens * getModelPrice(model).output) / 1_000_000, 0)
+    : null;
+
+  const estimateCostFallback = (prompt: number, completion: number) => {
+    return (prompt * DEFAULT_PRICING.input + completion * DEFAULT_PRICING.output) / 1_000_000;
+  };
+
+  const totals = stats ? Object.values(stats).reduce((acc, s) => ({
+    calls: acc.calls + s.calls,
+    errors: acc.errors + s.errors,
+    streamingCalls: acc.streamingCalls + (s.streamingCalls ?? 0),
+    promptTokens: acc.promptTokens + s.promptTokens,
+    completionTokens: acc.completionTokens + s.completionTokens,
+    totalTokens: acc.totalTokens + s.totalTokens,
+    totalDuration: acc.totalDuration + (s.avgDurationMs * s.calls),
+    totalTtft: acc.totalTtft + ((s.avgTtftMs ?? 0) * (s.streamingCalls ?? 0)),
+    totalStreamCalls: acc.totalStreamCalls + (s.streamingCalls ?? 0),
+  }), { calls: 0, errors: 0, streamingCalls: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, totalDuration: 0, totalTtft: 0, totalStreamCalls: 0 }) : null;
+
+  const statCardStyle: React.CSSProperties = {
+    background: "rgba(0,0,0,0.3)",
+    border: "1px solid rgba(255,255,255,0.06)",
+    borderRadius: "12px",
+    padding: "18px 20px",
+  };
+
+  const statLabelStyle: React.CSSProperties = {
+    display: "flex", alignItems: "center", gap: "8px",
+    fontSize: "13px", fontWeight: 600, color: "#94a3b8", marginBottom: "14px",
+  };
+
+  const bigNumStyle: React.CSSProperties = {
+    fontSize: "26px", fontWeight: 700, fontFamily: "'JetBrains Mono', Menlo, monospace",
+    letterSpacing: "-0.02em",
+  };
+
+  const subNumStyle: React.CSSProperties = {
+    fontSize: "12px", color: "#475569", marginTop: "2px",
+  };
+
   return (
     <>
-      {/* Stats */}
-      <Card style={{ marginBottom: "14px" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "16px" }}>
-          <SectionTitle>用量统计</SectionTitle>
-          <button onClick={onRefresh} style={{
-            background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)",
-            borderRadius: "6px", padding: "4px 10px", color: "#64748b", fontSize: "12px",
-            cursor: "pointer",
-          }}>刷新</button>
+      {/* Stats Panel Header */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "16px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <div style={{ width: "4px", height: "20px", background: "linear-gradient(180deg, #6366f1, #8b5cf6)", borderRadius: "2px" }} />
+          <span style={{ fontSize: "17px", fontWeight: 700, color: "#f1f5f9" }}>统计面板</span>
         </div>
+        <div style={{ display: "flex", gap: "8px" }}>
+          <button onClick={onRefresh} style={{
+            padding: "6px 16px", borderRadius: "8px", fontSize: "12px", fontWeight: 600,
+            background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)",
+            color: "#94a3b8", cursor: "pointer", display: "flex", alignItems: "center", gap: "5px",
+          }}>&#8635; 刷新</button>
+          <button onClick={resetStats} disabled={resetting || !apiKey} style={{
+            padding: "6px 16px", borderRadius: "8px", fontSize: "12px", fontWeight: 600,
+            background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)",
+            color: "#f87171", cursor: (!apiKey || resetting) ? "not-allowed" : "pointer",
+            opacity: (!apiKey || resetting) ? 0.5 : 1,
+          }}>重置</button>
+        </div>
+      </div>
 
-        {!apiKey ? (
-          <p style={{ margin: 0, fontSize: "13px", color: "#475569" }}>请先在首页填入 API Key 后查看统计。</p>
-        ) : statsError === "server" ? (
-          <p style={{ margin: 0, fontSize: "13px", color: "#f87171" }}>服务器未配置 PROXY_API_KEY — 请运行配置助手完成初始化。</p>
-        ) : statsError === "auth" ? (
+      {!apiKey ? (
+        <Card><p style={{ margin: 0, fontSize: "13px", color: "#475569" }}>请先在首页填入 API Key 后查看统计。</p></Card>
+      ) : statsError === "server" ? (
+        <Card><p style={{ margin: 0, fontSize: "13px", color: "#f87171" }}>服务器未配置 PROXY_API_KEY — 请运行配置助手完成初始化。</p></Card>
+      ) : statsError === "auth" ? (
+        <Card>
           <div style={{ fontSize: "13px", color: "#f87171", lineHeight: "1.7" }}>
             <div style={{ fontWeight: 600, marginBottom: "6px" }}>认证失败（API Key 不匹配）</div>
             <div style={{ color: "#94a3b8", fontSize: "12.5px" }}>
               首页填入的 API Key 需与配置时设定的密码完全一致。
             </div>
             <div style={{ color: "#475569", fontSize: "12px", marginTop: "6px" }}>
-              如果忘记了密码，请在 Replit 左侧边栏 <strong style={{ color: "#94a3b8" }}>🔒 Secrets</strong> 面板中查看
+              如果忘记了密码，请在 Replit 左侧边栏 <strong style={{ color: "#94a3b8" }}>&#128274; Secrets</strong> 面板中查看
               <code style={{ color: "#a78bfa", fontFamily: "Menlo, monospace", marginLeft: "4px" }}>PROXY_API_KEY</code>
               的值，也可以重新运行配置助手修改密码。
             </div>
           </div>
-        ) : !stats ? (
-          <p style={{ margin: 0, fontSize: "13px", color: "#475569" }}>加载中...</p>
-        ) : (
-          <>
-            {/* Summary row */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: "10px", marginBottom: "16px" }}>
-              {(() => {
-                const total = Object.values(stats).reduce((acc, s) => ({
-                  calls: acc.calls + s.calls,
-                  tokens: acc.tokens + s.totalTokens,
-                  errors: acc.errors + s.errors,
-                }), { calls: 0, tokens: 0, errors: 0 });
-                return [
-                  { label: "总请求数", value: total.calls.toString(), color: "#818cf8" },
-                  { label: "总 Tokens", value: `${(total.tokens / 1000).toFixed(1)}K`, color: "#34d399" },
-                  { label: "错误数", value: total.errors.toString(), color: total.errors > 0 ? "#f87171" : "#4ade80" },
-                ].map((s) => (
-                  <div key={s.label} style={{
-                    background: "rgba(0,0,0,0.25)", border: "1px solid rgba(255,255,255,0.06)",
-                    borderRadius: "10px", padding: "14px",
-                  }}>
-                    <div style={{ fontSize: "22px", fontWeight: 700, color: s.color, fontFamily: "Menlo, monospace" }}>{s.value}</div>
-                    <div style={{ fontSize: "11px", color: "#475569", marginTop: "4px" }}>{s.label}</div>
-                  </div>
-                ));
-              })()}
+        </Card>
+      ) : !stats ? (
+        <Card><p style={{ margin: 0, fontSize: "13px", color: "#475569" }}>加载中...</p></Card>
+      ) : (
+        <>
+          {/* 6 Summary Cards - 3x2 Grid */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: "12px", marginBottom: "16px" }}>
+            {/* 使用统计 */}
+            <div style={statCardStyle}>
+              <div style={statLabelStyle}>
+                <span style={{ fontSize: "15px" }}>&#128202;</span>
+                <span>使用统计</span>
+              </div>
+              <div style={{ display: "flex", gap: "24px" }}>
+                <div>
+                  <div style={subNumStyle}>请求次数</div>
+                  <div style={{ ...bigNumStyle, color: "#818cf8" }}>{totals!.calls}</div>
+                </div>
+                <div>
+                  <div style={subNumStyle}>流式请求</div>
+                  <div style={{ ...bigNumStyle, color: "#3b82f6" }}>{totals!.streamingCalls}</div>
+                </div>
+              </div>
             </div>
 
-            {/* Per-backend rows */}
-            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-              {Object.entries(stats).map(([label, s]) => {
-                const isEnabled = s.enabled !== false;
-                const isHealthy = s.health === "healthy";
-                return (
-                <div key={label} style={{
-                  background: isEnabled ? "rgba(0,0,0,0.2)" : "rgba(0,0,0,0.35)",
-                  border: `1px solid ${isEnabled ? "rgba(255,255,255,0.06)" : "rgba(248,113,113,0.15)"}`,
-                  borderRadius: "8px", padding: "12px 14px",
-                  opacity: isEnabled ? 1 : 0.65,
-                }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px", flexWrap: "wrap" }}>
-                    <div style={{
-                      width: "7px", height: "7px", borderRadius: "50%",
-                      background: !isEnabled ? "#64748b" : isHealthy ? "#4ade80" : "#f87171",
-                      boxShadow: (isEnabled && isHealthy) ? "0 0 5px #4ade80" : undefined,
-                      flexShrink: 0,
-                    }} />
-                    <span style={{ fontSize: "13px", fontWeight: 600, color: isEnabled ? "#94a3b8" : "#475569", fontFamily: "Menlo, monospace" }}>{label}</span>
-                    {s.dynamic && <span style={{ fontSize: "10px", color: "#a78bfa", background: "rgba(167,139,250,0.15)", border: "1px solid rgba(167,139,250,0.3)", borderRadius: "4px", padding: "1px 5px" }}>动态</span>}
-                    {!isEnabled && <span style={{ fontSize: "10px", color: "#f87171", background: "rgba(248,113,113,0.1)", border: "1px solid rgba(248,113,113,0.25)", borderRadius: "4px", padding: "1px 5px" }}>已禁用</span>}
-                    {s.url && <span style={{ fontSize: "11px", color: "#334155", fontFamily: "Menlo, monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{s.url}</span>}
+            {/* Token 用量 */}
+            <div style={statCardStyle}>
+              <div style={statLabelStyle}>
+                <span style={{ fontSize: "15px" }}>&#9889;</span>
+                <span style={{ color: "#fbbf24" }}>Token 用量</span>
+              </div>
+              <div style={{ display: "flex", gap: "24px" }}>
+                <div>
+                  <div style={subNumStyle}>输入</div>
+                  <div style={{ ...bigNumStyle, color: "#34d399" }}>{fmt(totals!.promptTokens)}</div>
+                </div>
+                <div>
+                  <div style={subNumStyle}>输出</div>
+                  <div style={{ ...bigNumStyle, color: "#34d399" }}>{fmt(totals!.completionTokens)}</div>
+                </div>
+              </div>
+            </div>
+
+            {/* 预估开销 */}
+            <div style={statCardStyle}>
+              <div style={statLabelStyle}>
+                <span style={{ fontSize: "15px" }}>&#128176;</span>
+                <span style={{ color: "#f59e0b" }}>预估开销</span>
+                {totalModelCost !== null && <span style={{ fontSize: "10px", color: "#475569", marginLeft: "auto" }}>按模型定价</span>}
+              </div>
+              <div>
+                <div style={subNumStyle}>总开销</div>
+                <div style={{ ...bigNumStyle, color: "#f59e0b" }}>
+                  ${(totalModelCost ?? estimateCostFallback(totals!.promptTokens, totals!.completionTokens)).toFixed(2)}
+                </div>
+                <div style={{ display: "flex", gap: "12px", marginTop: "4px" }}>
+                  <span style={{ fontSize: "11px", color: "#475569" }}>输入 <span style={{ color: "#f59e0b" }}>${(totalModelInputCost ?? (totals!.promptTokens * DEFAULT_PRICING.input / 1_000_000)).toFixed(2)}</span></span>
+                  <span style={{ fontSize: "11px", color: "#475569" }}>输出 <span style={{ color: "#f59e0b" }}>${(totalModelOutputCost ?? (totals!.completionTokens * DEFAULT_PRICING.output / 1_000_000)).toFixed(2)}</span></span>
+                </div>
+              </div>
+            </div>
+
+            {/* 成功率 */}
+            <div style={statCardStyle}>
+              <div style={statLabelStyle}>
+                <span style={{ fontSize: "15px" }}>&#9989;</span>
+                <span>成功率</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: "20px" }}>
+                <div style={{ position: "relative", width: "52px", height: "52px" }}>
+                  <svg width="52" height="52" viewBox="0 0 52 52">
+                    <circle cx="26" cy="26" r="20" fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="5" />
+                    {totals!.calls > 0 && (
+                      <circle cx="26" cy="26" r="20" fill="none" stroke="#4ade80" strokeWidth="5"
+                        strokeDasharray={`${((totals!.calls - totals!.errors) / totals!.calls) * 125.6} 125.6`}
+                        strokeLinecap="round" transform="rotate(-90 26 26)" />
+                    )}
+                  </svg>
+                  <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "11px", fontWeight: 700, color: "#94a3b8" }}>
+                    {totals!.calls > 0 ? `${Math.round(((totals!.calls - totals!.errors) / totals!.calls) * 100)}%` : "--"}
                   </div>
-                  <div style={{ display: "flex", gap: "16px", flexWrap: "wrap" }}>
-                    {[
-                      { label: "请求", value: s.calls },
-                      { label: "错误", value: s.errors, color: s.errors > 0 ? "#f87171" : undefined },
-                      { label: "Prompt", value: `${(s.promptTokens / 1000).toFixed(1)}K` },
-                      { label: "输出", value: `${(s.completionTokens / 1000).toFixed(1)}K` },
-                      { label: "总 Token", value: `${(s.totalTokens / 1000).toFixed(1)}K` },
-                      { label: "均耗时", value: `${s.avgDurationMs}ms` },
-                      ...(s.avgTtftMs ? [{ label: "首 Token", value: `${s.avgTtftMs}ms` }] : []),
-                    ].map((item) => (
-                      <div key={item.label} style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
-                        <span style={{ fontSize: "10px", color: "#475569" }}>{item.label}</span>
-                        <span style={{ fontSize: "13px", fontWeight: 600, color: (item as { color?: string }).color ?? "#cbd5e1", fontFamily: "Menlo, monospace" }}>{item.value}</span>
+                </div>
+                <div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "4px" }}>
+                    <div style={{ width: "8px", height: "8px", borderRadius: "50%", background: "#4ade80" }} />
+                    <span style={{ fontSize: "12px", color: "#94a3b8" }}>成功 <strong style={{ color: "#e2e8f0" }}>{totals!.calls - totals!.errors}</strong></span>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                    <div style={{ width: "8px", height: "8px", borderRadius: "50%", background: "#f87171" }} />
+                    <span style={{ fontSize: "12px", color: "#94a3b8" }}>失败 <strong style={{ color: "#e2e8f0" }}>{totals!.errors}</strong></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* 性能指标 */}
+            <div style={statCardStyle}>
+              <div style={statLabelStyle}>
+                <span style={{ fontSize: "15px" }}>&#127919;</span>
+                <span style={{ color: "#f43f5e" }}>性能指标</span>
+              </div>
+              <div style={{ display: "flex", gap: "24px" }}>
+                <div>
+                  <div style={subNumStyle}>平均耗时</div>
+                  <div style={{ ...bigNumStyle, fontSize: "20px", color: "#e2e8f0" }}>
+                    {totals!.calls > 0 ? `${Math.round(totals!.totalDuration / totals!.calls)}ms` : "--"}
+                  </div>
+                </div>
+                <div>
+                  <div style={subNumStyle}>平均 TTFT</div>
+                  <div style={{ ...bigNumStyle, fontSize: "20px", color: "#e2e8f0" }}>
+                    {totals!.totalStreamCalls > 0 ? `${Math.round(totals!.totalTtft / totals!.totalStreamCalls)}ms` : "--"}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* 按模型开销 */}
+            <div style={statCardStyle}>
+              <div style={statLabelStyle}>
+                <span style={{ fontSize: "15px" }}>&#128221;</span>
+                <span style={{ color: "#a78bfa" }}>按模型开销</span>
+              </div>
+              {(() => {
+                if (!modelStats || Object.keys(modelStats).length === 0) {
+                  return <div style={{ fontSize: "12px", color: "#475569" }}>暂无数据</div>;
+                }
+                const sorted = Object.entries(modelStats)
+                  .filter(([, ms]) => ms.calls > 0)
+                  .map(([model, ms]) => ({ model, cost: estimateModelCost(model, ms.promptTokens, ms.completionTokens), calls: ms.calls }))
+                  .sort((a, b) => b.cost - a.cost);
+                if (sorted.length === 0) return <div style={{ fontSize: "12px", color: "#475569" }}>暂无数据</div>;
+                return (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "5px", maxHeight: "120px", overflowY: "auto" }}>
+                    {sorted.map(({ model, cost, calls }) => (
+                      <div key={model} style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", gap: "8px" }}>
+                        <span style={{ color: "#94a3b8", fontFamily: "Menlo, monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }} title={model}>{model}</span>
+                        <span style={{ color: "#475569", flexShrink: 0 }}>{calls}次</span>
+                        <span style={{ color: "#f59e0b", fontWeight: 600, flexShrink: 0 }}>${cost.toFixed(4)}</span>
                       </div>
                     ))}
                   </div>
-                </div>
                 );
-              })}
+              })()}
             </div>
-          </>
-        )}
-      </Card>
+          </div>
+
+          {/* Per-backend node cards */}
+          <Card style={{ marginBottom: "14px" }}>
+            <SectionTitle>节点统计</SectionTitle>
+            {Object.entries(stats).length === 0 ? (
+              <div style={{ textAlign: "center", padding: "40px 0" }}>
+                <div style={{ fontSize: "40px", marginBottom: "8px", opacity: 0.3 }}>&#128172;</div>
+                <div style={{ color: "#64748b", fontSize: "14px", fontWeight: 600 }}>暂无统计数据</div>
+                <div style={{ color: "#475569", fontSize: "12px", marginTop: "4px" }}>发起 API 请求后统计将自动开始记录</div>
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                {Object.entries(stats).map(([label, s]) => {
+                  const isEnabled = s.enabled !== false;
+                  const isHealthy = s.health === "healthy";
+                  const cost = estimateCostFallback(s.promptTokens, s.completionTokens);
+                  return (
+                    <div key={label} style={{
+                      background: isEnabled ? "rgba(0,0,0,0.2)" : "rgba(0,0,0,0.35)",
+                      border: `1px solid ${isEnabled ? "rgba(255,255,255,0.06)" : "rgba(248,113,113,0.15)"}`,
+                      borderRadius: "10px", padding: "14px 16px",
+                      opacity: isEnabled ? 1 : 0.6,
+                    }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "10px", flexWrap: "wrap" }}>
+                        <div style={{
+                          width: "8px", height: "8px", borderRadius: "50%",
+                          background: !isEnabled ? "#64748b" : isHealthy ? "#4ade80" : "#f87171",
+                          boxShadow: (isEnabled && isHealthy) ? "0 0 6px #4ade80" : undefined,
+                        }} />
+                        <span style={{ fontSize: "13px", fontWeight: 700, color: isEnabled ? "#e2e8f0" : "#64748b", fontFamily: "'JetBrains Mono', Menlo, monospace" }}>{label}</span>
+                        {s.dynamic && <span style={{ fontSize: "10px", color: "#a78bfa", background: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.25)", borderRadius: "4px", padding: "1px 6px" }}>动态</span>}
+                        {!isEnabled && <span style={{ fontSize: "10px", color: "#f87171", background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.2)", borderRadius: "4px", padding: "1px 6px" }}>已禁用</span>}
+                        {s.url && <span style={{ fontSize: "11px", color: "#334155", fontFamily: "Menlo, monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{s.url}</span>}
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(80px, 1fr))", gap: "12px" }}>
+                        {[
+                          { label: "请求", value: s.calls.toString(), color: "#818cf8" },
+                          { label: "流式", value: (s.streamingCalls ?? 0).toString(), color: "#3b82f6" },
+                          { label: "错误", value: s.errors.toString(), color: s.errors > 0 ? "#f87171" : "#4ade80" },
+                          { label: "输入 Token", value: fmt(s.promptTokens), color: "#34d399" },
+                          { label: "输出 Token", value: fmt(s.completionTokens), color: "#34d399" },
+                          { label: "均耗时", value: s.calls > 0 ? `${s.avgDurationMs}ms` : "--", color: "#e2e8f0" },
+                          { label: "首 Token", value: s.avgTtftMs ? `${s.avgTtftMs}ms` : "--", color: "#e2e8f0" },
+                          { label: "开销", value: `$${cost.toFixed(2)}`, color: "#f59e0b" },
+                        ].map((item) => (
+                          <div key={item.label}>
+                            <div style={{ fontSize: "10px", color: "#475569", marginBottom: "2px" }}>{item.label}</div>
+                            <div style={{ fontSize: "14px", fontWeight: 600, color: item.color, fontFamily: "'JetBrains Mono', Menlo, monospace" }}>{item.value}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </Card>
+        </>
+      )}
 
       {/* Routing Settings */}
       {apiKey && (
@@ -1715,7 +2003,7 @@ function PageModels({
 // Main App
 // ---------------------------------------------------------------------------
 
-type Tab = "home" | "stats" | "models" | "endpoints";
+type Tab = "home" | "stats" | "models" | "logs" | "endpoints";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("home");
@@ -1727,7 +2015,8 @@ export default function App() {
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({
     openai: false, anthropic: false, gemini: false, openrouter: false,
   });
-  const [stats, setStats] = useState<Record<string, { calls: number; errors: number; promptTokens: number; completionTokens: number; totalTokens: number; avgDurationMs: number; avgTtftMs: number | null; health: string; url?: string; dynamic?: boolean; enabled?: boolean }> | null>(null);
+  const [stats, setStats] = useState<Record<string, BackendStat> | null>(null);
+  const [modelStats, setModelStats] = useState<Record<string, ModelStat> | null>(null);
   const [statsError, setStatsError] = useState<false | "auth" | "server">(false);
   const [routing, setRouting] = useState<{ localEnabled: boolean; localFallback: boolean; fakeStream: boolean }>({ localEnabled: true, localFallback: true, fakeStream: true });
   const [addUrl, setAddUrl] = useState("");
@@ -1772,7 +2061,7 @@ export default function App() {
   };
 
   const fetchStats = useCallback(async (key: string) => {
-    if (!key) { setStats(null); setStatsError(false); return; }
+    if (!key) { setStats(null); setModelStats(null); setStatsError(false); return; }
     try {
       const r = await fetch(`${baseUrl}/api/v1/stats`, { headers: { Authorization: `Bearer ${key}` } });
       if (!r.ok) {
@@ -1780,7 +2069,12 @@ export default function App() {
         return;
       }
       const d = await r.json();
-      setStats(d.stats); setStatsError(false);
+      const parsed: Record<string, BackendStat> = {};
+      for (const [k, v] of Object.entries(d.stats as Record<string, Record<string, unknown>>)) {
+        parsed[k] = { ...(v as unknown as BackendStat), streamingCalls: (v.streamingCalls as number) ?? 0 };
+      }
+      setStats(parsed); setStatsError(false);
+      setModelStats(d.modelStats && typeof d.modelStats === "object" ? d.modelStats as Record<string, ModelStat> : null);
       if (d.routing) setRouting(d.routing);
     } catch { setStatsError("auth"); }
   }, [baseUrl]);
@@ -1925,11 +2219,12 @@ export default function App() {
       .catch(() => {});
   }, [baseUrl]);
 
-  const TABS: { id: Tab; label: string }[] = [
-    { id: "home", label: "首页" },
-    { id: "stats", label: "统计 & 节点" },
-    { id: "models", label: "模型管理" },
-    { id: "endpoints", label: "端点文档" },
+  const TABS: { id: Tab; label: string; icon: string }[] = [
+    { id: "home", label: "概览", icon: "&#127968;" },
+    { id: "stats", label: "统计", icon: "&#128200;" },
+    { id: "models", label: "模型", icon: "&#129302;" },
+    { id: "logs", label: "日志", icon: "&#128203;" },
+    { id: "endpoints", label: "文档", icon: "&#128214;" },
   ];
 
   return (
@@ -1951,66 +2246,83 @@ export default function App() {
 
       <UpdateBar baseUrl={baseUrl} apiKey={apiKey} />
 
-      <div style={{ maxWidth: "900px", margin: "0 auto", padding: "32px 24px 80px" }}>
+      <div style={{ maxWidth: "920px", margin: "0 auto", padding: "28px 24px 80px" }}>
 
         {/* Header */}
-        <div style={{ marginBottom: "28px" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "8px" }}>
+        <div style={{
+          marginBottom: "24px",
+          background: "linear-gradient(135deg, rgba(99,102,241,0.08) 0%, rgba(139,92,246,0.06) 50%, rgba(59,130,246,0.04) 100%)",
+          border: "1px solid rgba(99,102,241,0.12)",
+          borderRadius: "16px", padding: "24px 28px",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "14px", marginBottom: "10px" }}>
             <div style={{
-              width: "38px", height: "38px", borderRadius: "10px",
-              background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
-              display: "flex", alignItems: "center", justifyContent: "center", fontSize: "19px",
-            }}>⚡</div>
-            <h1 style={{ margin: 0, fontSize: "21px", fontWeight: 700, color: "#f1f5f9" }}>Replit2Api</h1>
-            <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "8px" }}>
+              width: "44px", height: "44px", borderRadius: "12px",
+              background: "linear-gradient(135deg, #6366f1, #8b5cf6, #3b82f6)",
+              display: "flex", alignItems: "center", justifyContent: "center", fontSize: "22px",
+              boxShadow: "0 4px 16px rgba(99,102,241,0.3)",
+            }}>&#9889;</div>
+            <div>
+              <h1 style={{ margin: 0, fontSize: "22px", fontWeight: 700, color: "#f1f5f9", letterSpacing: "-0.02em" }}>Replit2Api</h1>
+              <p style={{ color: "#64748b", margin: "2px 0 0", fontSize: "12.5px" }}>
+                AI Proxy Gateway · OpenAI / Anthropic / Gemini / OpenRouter
+              </p>
+            </div>
+            <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap", justifyContent: "flex-end" }}>
               <UpdateBadge baseUrl={baseUrl} apiKey={apiKey} />
               <button onClick={() => setShowWizard(true)} style={{
-                padding: "5px 12px", background: "rgba(99,102,241,0.12)",
-                border: "1px solid rgba(99,102,241,0.25)", borderRadius: "100px",
-                color: "#818cf8", fontSize: "12px", fontWeight: 600, cursor: "pointer",
+                padding: "6px 14px", background: "linear-gradient(135deg, rgba(99,102,241,0.2), rgba(139,92,246,0.15))",
+                border: "1px solid rgba(99,102,241,0.3)", borderRadius: "100px",
+                color: "#a5b4fc", fontSize: "12px", fontWeight: 600, cursor: "pointer",
                 display: "flex", alignItems: "center", gap: "5px",
-              }}>🚀 配置向导</button>
+                transition: "all 0.2s",
+              }}>&#128640; 配置向导</button>
               <div style={{
                 display: "flex", alignItems: "center", gap: "6px",
-                background: online === null ? "rgba(100,116,139,0.15)" : online ? "rgba(74,222,128,0.12)" : "rgba(248,113,113,0.12)",
-                border: `1px solid ${online === null ? "rgba(100,116,139,0.3)" : online ? "rgba(74,222,128,0.3)" : "rgba(248,113,113,0.3)"}`,
-                borderRadius: "100px", padding: "4px 10px 4px 8px",
+                background: online === null ? "rgba(100,116,139,0.15)" : online ? "rgba(74,222,128,0.1)" : "rgba(248,113,113,0.1)",
+                border: `1px solid ${online === null ? "rgba(100,116,139,0.3)" : online ? "rgba(74,222,128,0.25)" : "rgba(248,113,113,0.25)"}`,
+                borderRadius: "100px", padding: "5px 12px 5px 8px",
               }}>
                 <div style={{
                   width: "8px", height: "8px", borderRadius: "50%",
                   background: online === null ? "#64748b" : online ? "#4ade80" : "#f87171",
-                  boxShadow: online ? "0 0 6px #4ade80" : undefined,
+                  boxShadow: online ? "0 0 8px rgba(74,222,128,0.5)" : undefined,
+                  animation: online ? "pulse 2s infinite" : undefined,
                 }} />
                 <span style={{ fontSize: "12px", color: online === null ? "#64748b" : online ? "#4ade80" : "#f87171", fontWeight: 600 }}>
-                  {online === null ? "检测中" : online ? "在线" : "离线"}
+                  {online === null ? "..." : online ? "在线" : "离线"}
                 </span>
               </div>
             </div>
           </div>
-          <p style={{ color: "#64748b", margin: 0, fontSize: "13.5px", lineHeight: "1.6" }}>
-            统一 AI API 网关 · OpenAI / Anthropic / Gemini / OpenRouter · OpenAI 兼容格式
-          </p>
         </div>
 
         {/* Tab bar */}
         <div style={{
-          display: "flex", gap: "4px", marginBottom: "24px",
-          background: "rgba(0,0,0,0.25)", border: "1px solid rgba(255,255,255,0.07)",
-          borderRadius: "10px", padding: "4px",
+          display: "flex", gap: "2px", marginBottom: "24px",
+          background: "rgba(0,0,0,0.3)", border: "1px solid rgba(255,255,255,0.06)",
+          borderRadius: "12px", padding: "4px",
+          backdropFilter: "blur(8px)",
         }}>
           {TABS.map((t) => (
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
               style={{
-                flex: 1, padding: "8px 12px", borderRadius: "7px", border: "none",
-                background: tab === t.id ? "rgba(99,102,241,0.25)" : "transparent",
-                color: tab === t.id ? "#a5b4fc" : "#475569",
-                fontSize: "13px", fontWeight: tab === t.id ? 600 : 400,
-                cursor: "pointer", transition: "all 0.15s",
-                boxShadow: tab === t.id ? "inset 0 0 0 1px rgba(99,102,241,0.35)" : "none",
+                flex: 1, padding: "9px 8px", borderRadius: "8px", border: "none",
+                background: tab === t.id
+                  ? "linear-gradient(135deg, rgba(99,102,241,0.25), rgba(139,92,246,0.2))"
+                  : "transparent",
+                color: tab === t.id ? "#c7d2fe" : "#475569",
+                fontSize: "12.5px", fontWeight: tab === t.id ? 600 : 400,
+                cursor: "pointer", transition: "all 0.2s",
+                boxShadow: tab === t.id
+                  ? "inset 0 0 0 1px rgba(99,102,241,0.3), 0 2px 8px rgba(99,102,241,0.1)"
+                  : "none",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: "5px",
               }}
             >
+              <span dangerouslySetInnerHTML={{ __html: t.icon }} style={{ fontSize: "13px" }} />
               {t.label}
             </button>
           ))}
@@ -2045,6 +2357,7 @@ export default function App() {
             onBatchRemove={batchRemoveBackends}
             routing={routing}
             onToggleRouting={toggleRouting}
+            modelStats={modelStats}
           />
         )}
         {tab === "models" && (
@@ -2058,13 +2371,11 @@ export default function App() {
             onToggleModel={toggleModelById}
           />
         )}
+        {tab === "logs" && (
+          <PageLogs baseUrl={baseUrl} apiKey={apiKey} />
+        )}
         {tab === "endpoints" && (
-          <PageEndpoints
-            displayUrl={displayUrl}
-            expandedGroups={expandedGroups}
-            onToggleGroup={(g) => setExpandedGroups((prev) => ({ ...prev, [g]: !prev[g] }))}
-            totalModels={totalModels}
-          />
+          <PageDocs />
         )}
 
         <div style={{ marginTop: "32px", textAlign: "center", color: "#1e293b", fontSize: "12px" }}>
