@@ -27,71 +27,116 @@ const STATUS_COLOR = (s: number) => s >= 500 ? "#ef4444" : s >= 400 ? "#f59e0b" 
 export default function PageLogs({ baseUrl, apiKey }: { baseUrl: string; apiKey: string }) {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [connected, setConnected] = useState(false);
+  const [connError, setConnError] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | "info" | "warn" | "error">("all");
   const [autoScroll, setAutoScroll] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const esRef = useRef<EventSource | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryCount = useRef(0);
   const unmounted = useRef(false);
 
   const cleanup = useCallback(() => {
     if (reconnectTimer.current) { clearTimeout(reconnectTimer.current); reconnectTimer.current = null; }
-    if (esRef.current) { esRef.current.close(); esRef.current = null; }
+    if (abortRef.current) { abortRef.current.abort(); abortRef.current = null; }
   }, []);
 
-  const connect = useCallback(() => {
+  const scheduleReconnect = useCallback(() => {
+    if (unmounted.current) return;
+    const delay = Math.min(2000 * Math.pow(2, retryCount.current), 30000);
+    retryCount.current++;
+    reconnectTimer.current = setTimeout(() => {
+      if (!unmounted.current) connectStream();
+    }, delay);
+  }, []);
+
+  const connectStream = useCallback(async () => {
     if (!apiKey || unmounted.current) return;
     cleanup();
 
-    fetch(`${baseUrl}/api/v1/admin/logs`, { headers: { Authorization: `Bearer ${apiKey}` } })
-      .then((r) => r.json())
-      .then((d) => { if (d.logs && !unmounted.current) setLogs(d.logs); })
-      .catch(() => {});
+    try {
+      const histRes = await fetch(`${baseUrl}/api/v1/admin/logs`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+      });
+      if (!histRes.ok) {
+        const body = await histRes.json().catch(() => ({}));
+        const msg = body?.error?.message || `HTTP ${histRes.status}`;
+        setConnError(msg);
+        setConnected(false);
+        scheduleReconnect();
+        return;
+      }
+      const histData = await histRes.json();
+      if (histData.logs && !unmounted.current) setLogs(histData.logs);
+    } catch {
+    }
 
-    const es = new EventSource(`${baseUrl}/api/v1/admin/logs/stream?key=${apiKey}`);
-    esRef.current = es;
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
 
-    es.onopen = () => {
-      if (unmounted.current) return;
-      retryCount.current = 0;
+    try {
+      const res = await fetch(`${baseUrl}/api/v1/admin/logs/stream?key=${encodeURIComponent(apiKey)}`, {
+        headers: { Accept: "text/event-stream" },
+        signal: ctrl.signal,
+      });
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        const msg = body?.error?.message || `HTTP ${res.status}`;
+        setConnError(msg);
+        setConnected(false);
+        scheduleReconnect();
+        return;
+      }
+
       setConnected(true);
-    };
+      setConnError(null);
+      retryCount.current = 0;
 
-    es.onmessage = (e) => {
-      if (unmounted.current) return;
-      try {
-        const entry = JSON.parse(e.data) as LogEntry;
-        setLogs((prev) => {
-          const next = [...prev, entry];
-          return next.length > 200 ? next.slice(-200) : next;
-        });
-      } catch {}
-    };
+      const reader = res.body?.getReader();
+      if (!reader) { scheduleReconnect(); return; }
+      const decoder = new TextDecoder();
+      let buffer = "";
 
-    es.onerror = () => {
-      if (unmounted.current) return;
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done || unmounted.current) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const entry = JSON.parse(line.slice(6)) as LogEntry;
+              setLogs((prev) => {
+                const next = [...prev, entry];
+                return next.length > 200 ? next.slice(-200) : next;
+              });
+            } catch {}
+          }
+        }
+      }
+    } catch (err: unknown) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+    }
+
+    if (!unmounted.current) {
       setConnected(false);
-      es.close();
-      esRef.current = null;
-
-      const delay = Math.min(2000 * Math.pow(2, retryCount.current), 30000);
-      retryCount.current++;
-      reconnectTimer.current = setTimeout(() => {
-        if (!unmounted.current) connect();
-      }, delay);
-    };
-  }, [baseUrl, apiKey, cleanup]);
+      scheduleReconnect();
+    }
+  }, [baseUrl, apiKey, cleanup, scheduleReconnect]);
 
   useEffect(() => {
     unmounted.current = false;
-    connect();
+    connectStream();
     return () => {
       unmounted.current = true;
       cleanup();
       setConnected(false);
     };
-  }, [connect, cleanup]);
+  }, [connectStream, cleanup]);
 
   useEffect(() => {
     if (autoScroll && scrollRef.current) {
@@ -134,10 +179,10 @@ export default function PageLogs({ baseUrl, apiKey }: { baseUrl: string; apiKey:
             boxShadow: connected ? "0 0 8px #22c55e" : "none",
           }} />
           <span style={{ fontSize: "13px", color: connected ? "#22c55e" : "#ef4444" }}>
-            {connected ? "已连接" : "重连中..."}
+            {connected ? "已连接" : connError ? `连接失败: ${connError}` : "重连中..."}
           </span>
           {!connected && (
-            <button onClick={() => { retryCount.current = 0; connect(); }} style={{
+            <button onClick={() => { retryCount.current = 0; setConnError(null); connectStream(); }} style={{
               fontSize: "12px", padding: "4px 10px", borderRadius: "6px",
               background: "rgba(99,102,241,0.2)", color: "#a5b4fc",
               border: "1px solid rgba(99,102,241,0.3)", cursor: "pointer",
@@ -192,7 +237,7 @@ export default function PageLogs({ baseUrl, apiKey }: { baseUrl: string; apiKey:
       >
         {filtered.length === 0 && (
           <div style={{ textAlign: "center", color: "#475569", padding: "40px 0" }}>
-            {connected ? "等待日志输入..." : "正在尝试连接服务器..."}
+            {connected ? "等待日志输入..." : connError ? "请检查 API Key 是否正确，或服务器是否已配置 PROXY_API_KEY" : "正在尝试连接服务器..."}
           </div>
         )}
         {filtered.map((l) => (
