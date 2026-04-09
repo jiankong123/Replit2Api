@@ -286,6 +286,9 @@ function pickBackendExcluding(exclude: Set<string>): Backend | null {
 // Client factories
 // ---------------------------------------------------------------------------
 
+// Cached SDK clients — reuse across requests for HTTP keep-alive connection pooling
+const clientCache = new Map<string, OpenAI | Anthropic | GoogleGenAI>();
+
 function makeLocalOpenAI(): OpenAI {
   const apiKey = process.env.AI_INTEGRATIONS_OPENAI_API_KEY;
   const baseURL = process.env.AI_INTEGRATIONS_OPENAI_BASE_URL;
@@ -294,7 +297,10 @@ function makeLocalOpenAI(): OpenAI {
       "OpenAI integration is not configured. Please add the OpenAI integration in Replit (Tools → Integrations) to use GPT models."
     );
   }
-  return new OpenAI({ apiKey, baseURL });
+  const cacheKey = `openai:${apiKey}:${baseURL}`;
+  let client = clientCache.get(cacheKey) as OpenAI | undefined;
+  if (!client) { client = new OpenAI({ apiKey, baseURL }); clientCache.set(cacheKey, client); }
+  return client;
 }
 
 function makeLocalAnthropic(): Anthropic {
@@ -305,7 +311,10 @@ function makeLocalAnthropic(): Anthropic {
       "Anthropic integration is not configured. Please add the Anthropic integration in Replit (Tools → Integrations) to use Claude models."
     );
   }
-  return new Anthropic({ apiKey, baseURL });
+  const cacheKey = `anthropic:${apiKey}:${baseURL}`;
+  let client = clientCache.get(cacheKey) as Anthropic | undefined;
+  if (!client) { client = new Anthropic({ apiKey, baseURL }); clientCache.set(cacheKey, client); }
+  return client;
 }
 
 function makeLocalGemini(): GoogleGenAI {
@@ -316,7 +325,10 @@ function makeLocalGemini(): GoogleGenAI {
       "Gemini integration is not configured. Please add the Gemini integration in Replit (Tools → Integrations) to use Gemini models."
     );
   }
-  return new GoogleGenAI({ apiKey, httpOptions: { apiVersion: "", baseUrl } });
+  const cacheKey = `gemini:${apiKey}:${baseUrl}`;
+  let client = clientCache.get(cacheKey) as GoogleGenAI | undefined;
+  if (!client) { client = new GoogleGenAI({ apiKey, httpOptions: { apiVersion: "", baseUrl } }); clientCache.set(cacheKey, client); }
+  return client;
 }
 
 function makeLocalOpenRouter(): OpenAI {
@@ -327,7 +339,10 @@ function makeLocalOpenRouter(): OpenAI {
       "OpenRouter integration is not configured. Please add the OpenRouter integration in Replit (Tools → Integrations) to use OpenRouter models."
     );
   }
-  return new OpenAI({ apiKey, baseURL });
+  const cacheKey = `openrouter:${apiKey}:${baseURL}`;
+  let client = clientCache.get(cacheKey) as OpenAI | undefined;
+  if (!client) { client = new OpenAI({ apiKey, baseURL }); clientCache.set(cacheKey, client); }
+  return client;
 }
 
 
@@ -513,7 +528,7 @@ async function fakeStreamResponse(
     writeAndFlush(res, `data: ${JSON.stringify(tcChunk)}\n\n`);
   }
 
-  const CHUNK_SIZE = 4;
+  const CHUNK_SIZE = 20;
   for (let i = 0; i < fullContent.length; i += CHUNK_SIZE) {
     const slice = fullContent.slice(i, i + CHUNK_SIZE);
     const chunk = {
@@ -522,7 +537,7 @@ async function fakeStreamResponse(
     };
     writeAndFlush(res, `data: ${JSON.stringify(chunk)}\n\n`);
     if (i + CHUNK_SIZE < fullContent.length) {
-      await new Promise((r) => setTimeout(r, 10));
+      await new Promise((r) => setImmediate(r));
     }
   }
 
@@ -898,16 +913,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
     } as Parameters<typeof client.messages.create>[0];
 
     if (shouldStream) {
-      res.setHeader("Content-Type", "text/event-stream");
-      res.setHeader("Cache-Control", "no-cache");
-      res.setHeader("Connection", "keep-alive");
-      res.setHeader("X-Accel-Buffering", "no");
-
-      const keepalive = setInterval(() => {
-        if (!res.writableEnded) writeAndFlush(res, ": keepalive\n\n");
-      }, 5000);
-      req.on("close", () => clearInterval(keepalive));
-
+      let keepalive: ReturnType<typeof setInterval> | undefined;
       let inputTokens = 0;
       let outputTokens = 0;
 
@@ -915,6 +921,12 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
         const claudeStream = client.messages.stream(createParams as Parameters<typeof client.messages.stream>[0]);
 
         for await (const event of claudeStream) {
+          // Delay SSE header commit until upstream connection confirmed
+          if (!keepalive) {
+            setSseHeaders(res);
+            keepalive = setInterval(() => { if (!res.writableEnded) writeAndFlush(res, ": keepalive\n\n"); }, 20_000);
+            req.on("close", () => { if (keepalive) clearInterval(keepalive); });
+          }
           if (event.type === "message_start") {
             inputTokens = event.message.usage.input_tokens;
           } else if (event.type === "message_delta") {
@@ -932,7 +944,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
           promptTokens: inputTokens, completionTokens: outputTokens, level: "info",
         });
       } finally {
-        clearInterval(keepalive);
+        if (keepalive) clearInterval(keepalive);
       }
     } else {
       const result = await client.messages.create(createParams);
@@ -1375,15 +1387,16 @@ async function handleOpenAI({
 
   if (stream) {
     try {
-      setSseHeaders(res);
       let ttftMs: number | undefined;
       let promptTokens = 0;
       let completionTokens = 0;
+      // Delay SSE header commit until upstream connection succeeds — preserves retry window
       const streamResult = await client.chat.completions.create({
         ...params,
         stream: true,
         stream_options: { include_usage: true },
       });
+      setSseHeaders(res);
       for await (const chunk of streamResult) {
         if (ttftMs === undefined && (chunk.choices?.[0]?.delta?.content || chunk.choices?.[0]?.delta?.tool_calls)) {
           ttftMs = Date.now() - startTime;
@@ -1458,12 +1471,13 @@ async function handleGemini({
 
   if (stream) {
     try {
-      setSseHeaders(res);
       let ttftMs: number | undefined;
       let promptTokens = 0;
       let completionTokens = 0;
       const chatId = `chatcmpl-${Date.now()}`;
+      const created = Math.floor(Date.now() / 1000);
 
+      // Delay SSE header commit until upstream connection succeeds
       const response = await client.models.generateContentStream({
         model,
         contents,
@@ -1472,6 +1486,7 @@ async function handleGemini({
           ...(systemInstruction ? { systemInstruction } : {}),
         },
       });
+      setSseHeaders(res);
 
       for await (const chunk of response) {
         const text = chunk.text ?? "";
@@ -1485,7 +1500,7 @@ async function handleGemini({
         const oaiChunk = {
           id: chatId,
           object: "chat.completion.chunk",
-          created: Math.floor(Date.now() / 1000),
+          created,
           model,
           choices: [{
             index: 0,
@@ -1607,11 +1622,7 @@ async function handleClaude({
   const msgId = `msg_${Date.now()}`;
 
   if (stream) {
-    setSseHeaders(res);
-    const keepalive = setInterval(() => {
-      if (!res.writableEnded) writeAndFlush(res, ": keepalive\n\n");
-    }, 5000);
-    req.on("close", () => clearInterval(keepalive));
+    let keepalive: ReturnType<typeof setInterval> | undefined;
 
     try {
       const claudeStream = client.messages.stream(buildCreateParams() as Parameters<typeof client.messages.stream>[0]);
@@ -1620,15 +1631,28 @@ async function handleClaude({
       let outputTokens = 0;
       let thinkingStarted = false;
       let ttftMs: number | undefined;
-      // Track current tool_use block index for streaming
       let currentToolIndex = -1;
-      const toolIndexMap = new Map<number, number>(); // content_block index → tool_calls array index
+      const toolIndexMap = new Map<number, number>();
       let toolCallCount = 0;
+      let headersCommitted = false;
+
+      const created = Math.floor(Date.now() / 1000);
+      const chunkPrefix = { id: msgId, object: "chat.completion.chunk" as const, created, model };
+      const emitDelta = (delta: Record<string, unknown>, extra?: Record<string, unknown>) => {
+        writeAndFlush(res, `data: ${JSON.stringify({ ...chunkPrefix, choices: [{ index: 0, delta, finish_reason: null }], ...extra })}\n\n`);
+      };
 
       for await (const event of claudeStream) {
         if (event.type === "message_start") {
+          // Delay SSE header commit until upstream connection confirmed
+          if (!headersCommitted) {
+            setSseHeaders(res);
+            keepalive = setInterval(() => { if (!res.writableEnded) writeAndFlush(res, ": keepalive\n\n"); }, 20_000);
+            req.on("close", () => { if (keepalive) clearInterval(keepalive); });
+            headersCommitted = true;
+          }
           inputTokens = event.message.usage.input_tokens;
-          writeAndFlush(res, `data: ${JSON.stringify({ id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }] })}\n\n`);
+          emitDelta({ role: "assistant", content: "" });
 
         } else if (event.type === "content_block_start") {
           const block = event.content_block;
@@ -1636,24 +1660,16 @@ async function handleClaude({
           if (block.type === "thinking") {
             if (!thinkingStarted) {
               thinkingStarted = true;
-              writeAndFlush(res, `data: ${JSON.stringify({ id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { content: "<thinking>\n" }, finish_reason: null }] })}\n\n`);
+              emitDelta({ content: "<thinking>\n" });
             }
           } else if (block.type === "tool_use") {
-            if (thinkingStarted) {
-              writeAndFlush(res, `data: ${JSON.stringify({ id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { content: "\n</thinking>\n\n" }, finish_reason: null }] })}\n\n`);
-              thinkingStarted = false;
-            }
-            // Map this content block index to tool_calls array index
+            if (thinkingStarted) { emitDelta({ content: "\n</thinking>\n\n" }); thinkingStarted = false; }
             currentToolIndex = toolCallCount++;
             toolIndexMap.set(event.index, currentToolIndex);
             if (ttftMs === undefined) ttftMs = Date.now() - startTime;
-            // Send tool_call start chunk
-            writeAndFlush(res, `data: ${JSON.stringify({ id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { tool_calls: [{ index: currentToolIndex, id: block.id, type: "function", function: { name: block.name, arguments: "" } }] }, finish_reason: null }] })}\n\n`);
+            emitDelta({ tool_calls: [{ index: currentToolIndex, id: block.id, type: "function", function: { name: block.name, arguments: "" } }] });
           } else if (block.type === "text") {
-            if (thinkingStarted) {
-              writeAndFlush(res, `data: ${JSON.stringify({ id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { content: "\n</thinking>\n\n" }, finish_reason: null }] })}\n\n`);
-              thinkingStarted = false;
-            }
+            if (thinkingStarted) { emitDelta({ content: "\n</thinking>\n\n" }); thinkingStarted = false; }
           }
 
         } else if (event.type === "content_block_delta") {
@@ -1661,21 +1677,20 @@ async function handleClaude({
 
           if (delta.type === "thinking_delta") {
             const cleaned = delta.thinking.replace(/<\/?think>/g, "");
-            if (cleaned) writeAndFlush(res, `data: ${JSON.stringify({ id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { content: cleaned }, finish_reason: null }] })}\n\n`);
+            if (cleaned) emitDelta({ content: cleaned });
           } else if (delta.type === "text_delta") {
             if (ttftMs === undefined) ttftMs = Date.now() - startTime;
-            writeAndFlush(res, `data: ${JSON.stringify({ id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { content: delta.text }, finish_reason: null }] })}\n\n`);
+            emitDelta({ content: delta.text });
           } else if (delta.type === "input_json_delta") {
-            // Tool argument streaming
             const toolIdx = toolIndexMap.get(event.index) ?? currentToolIndex;
-            writeAndFlush(res, `data: ${JSON.stringify({ id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { tool_calls: [{ index: toolIdx, function: { arguments: delta.partial_json } }] }, finish_reason: null }] })}\n\n`);
+            emitDelta({ tool_calls: [{ index: toolIdx, function: { arguments: delta.partial_json } }] });
           }
 
         } else if (event.type === "message_delta") {
           outputTokens = event.usage.output_tokens;
           const stopReason = event.delta.stop_reason;
           const finishReason = stopReason === "tool_use" ? "tool_calls" : (stopReason ?? "stop");
-          writeAndFlush(res, `data: ${JSON.stringify({ id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: {}, finish_reason: finishReason }], usage: { prompt_tokens: inputTokens, completion_tokens: outputTokens, total_tokens: inputTokens + outputTokens } })}\n\n`);
+          writeAndFlush(res, `data: ${JSON.stringify({ ...chunkPrefix, choices: [{ index: 0, delta: {}, finish_reason: finishReason }], usage: { prompt_tokens: inputTokens, completion_tokens: outputTokens, total_tokens: inputTokens + outputTokens } })}\n\n`);
         }
       }
 
@@ -1683,7 +1698,7 @@ async function handleClaude({
       res.end();
       return { promptTokens: inputTokens, completionTokens: outputTokens, ttftMs };
     } finally {
-      clearInterval(keepalive);
+      if (keepalive) clearInterval(keepalive);
     }
 
   } else {
