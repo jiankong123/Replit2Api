@@ -298,6 +298,7 @@ function setSseHeaders(res: Response) {
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no");
   res.setHeader("Access-Control-Allow-Origin", "*");
+  (res.socket as import("net").Socket | null)?.setNoDelay(true);
   res.flushHeaders();
 }
 
@@ -666,14 +667,14 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
       let outputTokens = 0;
 
       try {
+        setSseHeaders(res);
+        writeAndFlush(res, ": ok\n\n");
+        keepalive = setInterval(() => { if (!res.writableEnded) writeAndFlush(res, ": keepalive\n\n"); }, 15_000);
+        req.on("close", () => { if (keepalive) clearInterval(keepalive); });
+
         const claudeStream = client.messages.stream(createParams as Parameters<typeof client.messages.stream>[0]);
 
         for await (const event of claudeStream) {
-          if (!keepalive) {
-            setSseHeaders(res);
-            keepalive = setInterval(() => { if (!res.writableEnded) writeAndFlush(res, ": keepalive\n\n"); }, 20_000);
-            req.on("close", () => { if (keepalive) clearInterval(keepalive); });
-          }
           if (event.type === "message_start") {
             inputTokens = event.message.usage.input_tokens;
           } else if (event.type === "message_delta") {
@@ -805,12 +806,13 @@ async function handleOpenAI({
       let ttftMs: number | undefined;
       let promptTokens = 0;
       let completionTokens = 0;
+      setSseHeaders(res);
+      writeAndFlush(res, ": ok\n\n");
       const streamResult = await client.chat.completions.create({
         ...params,
         stream: true,
         stream_options: { include_usage: true },
       });
-      setSseHeaders(res);
       for await (const chunk of streamResult) {
         if (ttftMs === undefined && (chunk.choices?.[0]?.delta?.content || chunk.choices?.[0]?.delta?.tool_calls)) {
           ttftMs = Date.now() - startTime;
@@ -825,8 +827,14 @@ async function handleOpenAI({
       res.end();
       return { promptTokens, completionTokens, ttftMs };
     } catch (streamErr) {
-      if (res.headersSent) throw streamErr;
-      req.log.warn({ err: streamErr }, "Real streaming failed, falling back to fake-stream");
+      const errMsg = streamErr instanceof Error ? streamErr.message : String(streamErr);
+      req.log.warn({ err: streamErr }, "Real streaming failed");
+      if (res.headersSent) {
+        writeAndFlush(res, `data: ${JSON.stringify({ error: { message: errMsg || "Streaming error", type: "server_error" } })}\n\n`);
+        writeAndFlush(res, "data: [DONE]\n\n");
+        res.end();
+        return { promptTokens: 0, completionTokens: 0, ttftMs: undefined };
+      }
       const result = await client.chat.completions.create({ ...params, stream: false });
       return fakeStreamResponse(res, result as unknown as Record<string, unknown>, startTime);
     }
@@ -891,6 +899,8 @@ async function handleGemini({
       const chatId = `chatcmpl-${Date.now()}`;
       const created = Math.floor(Date.now() / 1000);
 
+      setSseHeaders(res);
+      writeAndFlush(res, ": ok\n\n");
       const response = await client.models.generateContentStream({
         model,
         contents,
@@ -899,7 +909,6 @@ async function handleGemini({
           ...(systemInstruction ? { systemInstruction } : {}),
         },
       });
-      setSseHeaders(res);
 
       for await (const chunk of response) {
         const text = chunk.text ?? "";
@@ -928,8 +937,14 @@ async function handleGemini({
       res.end();
       return { promptTokens, completionTokens, ttftMs };
     } catch (streamErr) {
-      if (res.headersSent) throw streamErr;
-      req.log.warn({ err: streamErr }, "Gemini streaming failed, falling back to fake-stream");
+      const errMsg = streamErr instanceof Error ? streamErr.message : String(streamErr);
+      req.log.warn({ err: streamErr }, "Gemini streaming failed");
+      if (res.headersSent) {
+        writeAndFlush(res, `data: ${JSON.stringify({ error: { message: errMsg || "Gemini streaming error", type: "server_error" } })}\n\n`);
+        writeAndFlush(res, "data: [DONE]\n\n");
+        res.end();
+        return { promptTokens: 0, completionTokens: 0, ttftMs: undefined };
+      }
       const response = await client.models.generateContent({
         model, contents,
         config: { ...config, ...(systemInstruction ? { systemInstruction } : {}) },
@@ -999,7 +1014,8 @@ async function handleClaude({
   const systemMessages = messages
     .filter((m) => m.role === "system")
     .map((m) => (typeof m.content === "string" ? m.content : (m.content as OAIContentPart[]).map((p) => (p.type === "text" ? (p as { type: "text"; text: string }).text : "")).join("")))
-    .join("\n");
+    .join("\n")
+    .trim();
 
   const chatMessages = convertMessagesForClaude(messages);
 
@@ -1034,6 +1050,11 @@ async function handleClaude({
     let keepalive: ReturnType<typeof setInterval> | undefined;
 
     try {
+      setSseHeaders(res);
+      writeAndFlush(res, ": ok\n\n");
+      keepalive = setInterval(() => { if (!res.writableEnded) writeAndFlush(res, ": keepalive\n\n"); }, 15_000);
+      req.on("close", () => { if (keepalive) clearInterval(keepalive); });
+
       const claudeStream = client.messages.stream(buildCreateParams() as Parameters<typeof client.messages.stream>[0]);
 
       let inputTokens = 0;
@@ -1043,7 +1064,6 @@ async function handleClaude({
       let currentToolIndex = -1;
       const toolIndexMap = new Map<number, number>();
       let toolCallCount = 0;
-      let headersCommitted = false;
 
       const created = Math.floor(Date.now() / 1000);
       const chunkPrefix = { id: msgId, object: "chat.completion.chunk" as const, created, model };
@@ -1053,12 +1073,6 @@ async function handleClaude({
 
       for await (const event of claudeStream) {
         if (event.type === "message_start") {
-          if (!headersCommitted) {
-            setSseHeaders(res);
-            keepalive = setInterval(() => { if (!res.writableEnded) writeAndFlush(res, ": keepalive\n\n"); }, 20_000);
-            req.on("close", () => { if (keepalive) clearInterval(keepalive); });
-            headersCommitted = true;
-          }
           inputTokens = event.message.usage.input_tokens;
           emitDelta({ role: "assistant", content: "" });
 
