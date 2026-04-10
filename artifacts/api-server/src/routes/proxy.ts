@@ -41,13 +41,6 @@ const OPENROUTER_FEATURED = [
   "cohere/command-a", "amazon/nova-premier-v1", "baidu/ernie-4.5-300b-a47b",
 ];
 
-const OPENAI_MODELS = OPENAI_CHAT_MODELS.map((id) => ({ id, description: "OpenAI model" }));
-const CLAUDE_MODELS = ANTHROPIC_BASE_MODELS.flatMap((id) => [
-  { id, description: "Anthropic Claude model" },
-  { id: `${id}-thinking`, description: "Extended thinking (hidden)" },
-  { id: `${id}-thinking-visible`, description: "Extended thinking (visible)" },
-]);
-
 const ALL_MODELS = [
   ...OPENAI_CHAT_MODELS.map((id) => ({ id })),
   ...OPENAI_THINKING_ALIASES.map((id) => ({ id })),
@@ -63,40 +56,11 @@ const ALL_MODELS = [
 ];
 
 // ---------------------------------------------------------------------------
-// Backend pool — round-robin across local account + multiple friend proxies
-// with background health checking
-// ---------------------------------------------------------------------------
-
-type Backend =
-  | { kind: "local" }
-  | { kind: "friend"; label: string; url: string; apiKey: string };
-
-interface HealthEntry { healthy: boolean; checkedAt: number }
-const healthCache = new Map<string, HealthEntry>();
-const HEALTH_TTL_MS = 30_000;   // reuse cached result for 30s
-const HEALTH_TIMEOUT_MS = 15_000; // 15s timeout per check (Replit cold starts can take 10–30s)
-
-// ---------------------------------------------------------------------------
-// Dynamic backends (cloud-persisted via GCS in production, local file in dev)
-// ---------------------------------------------------------------------------
-
-interface DynamicBackend { label: string; url: string; enabled?: boolean }
-
-let dynamicBackends: DynamicBackend[] = [];
-
-function saveDynamicBackends(list: DynamicBackend[]): void {
-  writeJson("dynamic_backends.json", list).catch((err) => {
-    console.error("[persist] failed to save dynamic_backends:", err);
-  });
-}
-
-// ---------------------------------------------------------------------------
 // Model provider map + enable/disable management
 // ---------------------------------------------------------------------------
 
 type ModelProvider = "openai" | "anthropic" | "gemini" | "openrouter";
 
-// Build a complete id → provider lookup from the model constants above
 const MODEL_PROVIDER_MAP = new Map<string, ModelProvider>();
 
 for (const id of OPENAI_CHAT_MODELS) { MODEL_PROVIDER_MAP.set(id, "openai"); }
@@ -121,172 +85,22 @@ function saveDisabledModels(set: Set<string>): void {
   });
 }
 
-interface RoutingSettings { localEnabled: boolean; localFallback: boolean; fakeStream: boolean }
-let routingSettings: RoutingSettings = { localEnabled: true, localFallback: true, fakeStream: true };
-
 export const initReady: Promise<void> = (async () => {
-  const [savedBackends, savedDisabled, savedRouting] = await Promise.all([
-    readJson<DynamicBackend[]>("dynamic_backends.json").catch(() => null),
-    readJson<string[]>("disabled_models.json").catch(() => null),
-    readJson<Partial<RoutingSettings>>("routing_settings.json").catch(() => null),
-  ]);
-  if (Array.isArray(savedBackends)) {
-    dynamicBackends = savedBackends;
-    console.log(`[init] loaded ${dynamicBackends.length} dynamic backend(s)`);
-  }
+  const savedDisabled = await readJson<string[]>("disabled_models.json").catch(() => null);
   if (Array.isArray(savedDisabled)) {
     disabledModels = new Set<string>(savedDisabled);
     console.log(`[init] loaded ${disabledModels.size} disabled model(s)`);
   }
-  if (savedRouting && typeof savedRouting === "object") {
-    if (typeof savedRouting.localEnabled === "boolean") routingSettings.localEnabled = savedRouting.localEnabled;
-    if (typeof savedRouting.localFallback === "boolean") routingSettings.localFallback = savedRouting.localFallback;
-    if (typeof savedRouting.fakeStream === "boolean") routingSettings.fakeStream = savedRouting.fakeStream;
-  }
-  console.log("[init] routing settings:", JSON.stringify(routingSettings));
 })();
-
-function saveRoutingSettings(): void {
-  writeJson("routing_settings.json", routingSettings).catch((err) => {
-    console.error("[routing] failed to save settings:", err);
-  });
-}
 
 function isModelEnabled(id: string): boolean {
   return !disabledModels.has(id);
-}
-
-// Normalize sub-node endpoint URL — ensures it ends with /api.
-// Sub-nodes use the same dual-mount architecture: /api/v1/* routes.
-function normalizeSubNodeUrl(raw: string): string {
-  const url = raw.trim().replace(/\/+$/, "");
-  if (!url) return url;
-  return /\/api$/i.test(url) ? url : url + "/api";
-}
-
-function getFriendProxyConfigs(): { label: string; url: string; apiKey: string }[] {
-  const apiKey = process.env.PROXY_API_KEY ?? "";
-  const configs: { label: string; url: string; apiKey: string }[] = [];
-
-  // Auto-scan FRIEND_PROXY_URL, FRIEND_PROXY_URL_2 … FRIEND_PROXY_URL_20 from env
-  const envKeys = ["FRIEND_PROXY_URL", ...Array.from({ length: 19 }, (_, i) => `FRIEND_PROXY_URL_${i + 2}`)];
-  for (const key of envKeys) {
-    const raw = process.env[key];
-    if (raw) configs.push({ label: key.replace("FRIEND_PROXY_URL", "FRIEND"), url: normalizeSubNodeUrl(raw), apiKey });
-  }
-
-  // Merge dynamic backends (added via API), skip duplicates and disabled ones
-  const knownUrls = new Set(configs.map((c) => c.url));
-  for (const d of dynamicBackends) {
-    const url = normalizeSubNodeUrl(d.url);
-    if (!knownUrls.has(url) && d.enabled !== false) configs.push({ label: d.label, url, apiKey });
-  }
-
-  return configs;
-}
-
-// getAllFriendProxyConfigs — 返回全部节点（含禁用的），专供统计页面使用
-function getAllFriendProxyConfigs(): { label: string; url: string; apiKey: string; enabled: boolean }[] {
-  const apiKey = process.env.PROXY_API_KEY ?? "";
-  const configs: { label: string; url: string; apiKey: string; enabled: boolean }[] = [];
-
-  const envKeys = ["FRIEND_PROXY_URL", ...Array.from({ length: 19 }, (_, i) => `FRIEND_PROXY_URL_${i + 2}`)];
-  for (const key of envKeys) {
-    const raw = process.env[key];
-    if (raw) configs.push({ label: key.replace("FRIEND_PROXY_URL", "FRIEND"), url: normalizeSubNodeUrl(raw), apiKey, enabled: true });
-  }
-
-  const knownUrls = new Set(configs.map((c) => c.url));
-  for (const d of dynamicBackends) {
-    const url = normalizeSubNodeUrl(d.url);
-    if (!knownUrls.has(url)) configs.push({ label: d.label, url, apiKey, enabled: d.enabled !== false });
-  }
-
-  return configs;
-}
-
-async function probeHealth(url: string, apiKey: string): Promise<boolean> {
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
-    const resp = await fetch(`${url}/v1/models`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
-    return resp.ok;
-  } catch {
-    return false;
-  }
-}
-
-function getCachedHealth(url: string): boolean | null {
-  const entry = healthCache.get(url);
-  if (!entry) return null; // unknown — never checked
-  if (Date.now() - entry.checkedAt < HEALTH_TTL_MS) return entry.healthy;
-  return null; // stale
-}
-
-function setHealth(url: string, healthy: boolean): void {
-  healthCache.set(url, { healthy, checkedAt: Date.now() });
-}
-
-// Refresh stale/unknown health entries in the background (non-blocking)
-function refreshHealthAsync(): void {
-  const configs = getFriendProxyConfigs();
-  for (const { url, apiKey } of configs) {
-    if (getCachedHealth(url) === null) {
-      probeHealth(url, apiKey).then((ok) => setHealth(url, ok)).catch(() => setHealth(url, false));
-    }
-  }
-}
-
-// Kick off initial health checks after a short delay (server hasn't fully started yet)
-setTimeout(refreshHealthAsync, 2000);
-// Recheck every 30s
-setInterval(refreshHealthAsync, HEALTH_TTL_MS);
-
-function buildBackendPool(): Backend[] {
-  const friends: Backend[] = [];
-
-  for (const { label, url, apiKey } of getFriendProxyConfigs()) {
-    const healthy = getCachedHealth(url);
-    if (healthy !== false) {
-      friends.push({ kind: "friend", label, url, apiKey });
-    }
-  }
-
-  if (friends.length > 0) return friends;
-
-  if (routingSettings.localFallback && routingSettings.localEnabled) return [{ kind: "local" }];
-
-  return [];
-}
-
-let requestCounter = 0;
-
-function pickBackend(): Backend | null {
-  const pool = buildBackendPool();
-  if (pool.length === 0) return null;
-  const backend = pool[requestCounter % pool.length];
-  requestCounter++;
-  return backend;
-}
-
-function pickBackendExcluding(exclude: Set<string>): Backend | null {
-  const friends = buildBackendPool().filter(
-    (b) => b.kind === "friend" && !exclude.has(b.url)
-  );
-  if (friends.length > 0) return friends[requestCounter % friends.length];
-  if (routingSettings.localFallback && routingSettings.localEnabled) return { kind: "local" };
-  return null;
 }
 
 // ---------------------------------------------------------------------------
 // Client factories
 // ---------------------------------------------------------------------------
 
-// Cached SDK clients — reuse across requests for HTTP keep-alive connection pooling
 const clientCache = new Map<string, OpenAI | Anthropic | GoogleGenAI>();
 
 function makeLocalOpenAI(): OpenAI {
@@ -345,9 +159,8 @@ function makeLocalOpenRouter(): OpenAI {
   return client;
 }
 
-
 // ---------------------------------------------------------------------------
-// Per-backend usage statistics — persisted to cloudPersist ("usage_stats.json")
+// Usage statistics — persisted to cloudPersist ("usage_stats.json")
 // ---------------------------------------------------------------------------
 
 const STATS_FILE = "usage_stats.json";
@@ -379,8 +192,6 @@ const EMPTY_MODEL_STAT = (): ModelStat => ({
 
 const statsMap = new Map<string, BackendStat>();
 const modelStatsMap = new Map<string, ModelStat>();
-
-// ── Persistence helpers ────────────────────────────────────────────────────
 
 function statsToObject(): { backends: Record<string, BackendStat>; models: Record<string, ModelStat> } {
   return {
@@ -417,7 +228,7 @@ export const statsReady: Promise<void> = (async () => {
       const modelsRaw = (saved as { models?: Record<string, ModelStat> }).models;
 
       for (const [label, raw] of Object.entries(backendsRaw)) {
-        if (raw && typeof raw === "object" && "calls" in (raw as Record<string, unknown>)) {
+        if (raw && typeof raw === "object" && "calls" in (raw as unknown as Record<string, unknown>)) {
           statsMap.set(label, {
             calls:            Number((raw as BackendStat).calls)            || 0,
             errors:           Number((raw as BackendStat).errors)           || 0,
@@ -448,8 +259,6 @@ export const statsReady: Promise<void> = (async () => {
     console.warn(`[stats] could not load ${STATS_FILE}, starting fresh`);
   }
 })();
-
-// ── Stat accessors ─────────────────────────────────────────────────────────
 
 function getStat(label: string): BackendStat {
   if (!statsMap.has(label)) statsMap.set(label, EMPTY_STAT());
@@ -598,13 +407,7 @@ function requireApiKeyWithQuery(req: Request, res: Response, next: () => void) {
 // Routes
 // ---------------------------------------------------------------------------
 
-router.get("/v1/models", requireApiKey, (_req: Request, res: Response) => {
-  const pool = buildBackendPool();
-  const friendStatuses = getFriendProxyConfigs().map(({ label, url }) => ({
-    label,
-    url,
-    status: getCachedHealth(url) === null ? "unknown" : getCachedHealth(url) ? "healthy" : "down",
-  }));
+router.get("/v1/models", requireApiKeyWithQuery, (_req: Request, res: Response) => {
   res.json({
     object: "list",
     data: ALL_MODELS.filter((m) => isModelEnabled(m.id)).map((m) => ({
@@ -612,18 +415,12 @@ router.get("/v1/models", requireApiKey, (_req: Request, res: Response) => {
       object: "model",
       created: 1700000000,
       owned_by: "replit-proxy",
-      description: m.description,
     })),
-    _meta: {
-      active_backends: pool.length,
-      local: "healthy",
-      friends: friendStatuses,
-    },
   });
 });
 
 // ---------------------------------------------------------------------------
-// Image format conversion: OpenAI image_url → Anthropic image
+// Format conversion: OpenAI ↔ Anthropic
 // ---------------------------------------------------------------------------
 
 type OAIContentPart =
@@ -683,7 +480,6 @@ function convertContentForClaude(content: string | OAIContentPart[] | null | und
   });
 }
 
-// Convert OpenAI tools array → Anthropic tools array
 function convertToolsForClaude(tools: OAITool[]): { name: string; description: string; input_schema: unknown }[] {
   return tools.map((t) => ({
     name: t.function.name,
@@ -692,17 +488,15 @@ function convertToolsForClaude(tools: OAITool[]): { name: string; description: s
   }));
 }
 
-// Convert OpenAI messages (incl. tool_calls / tool roles) → Anthropic messages
 function convertMessagesForClaude(messages: OAIMessage[]): AnthropicMessage[] {
   const result: AnthropicMessage[] = [];
 
   for (const msg of messages) {
-    if (msg.role === "system") continue; // handled as top-level system param
+    if (msg.role === "system") continue;
 
     if (msg.role === "assistant") {
       const assistantMsg = msg as Extract<OAIMessage, { role: "assistant" }>;
       if (assistantMsg.tool_calls && assistantMsg.tool_calls.length > 0) {
-        // Convert tool_calls to Anthropic tool_use blocks
         const parts: AnthropicContentPart[] = [];
         const textContent = assistantMsg.content;
         if (textContent && (typeof textContent === "string" ? textContent.trim() : textContent.length > 0)) {
@@ -726,14 +520,12 @@ function convertMessagesForClaude(messages: OAIMessage[]): AnthropicMessage[] {
         });
       }
     } else if (msg.role === "tool") {
-      // Tool results → Anthropic user message with tool_result
       const toolMsg = msg as Extract<OAIMessage, { role: "tool" }>;
       result.push({
         role: "user",
         content: [{ type: "tool_result", tool_use_id: toolMsg.tool_call_id, content: toolMsg.content }],
       });
     } else {
-      // user (and any other role)
       result.push({
         role: "user",
         content: convertContentForClaude(msg.content as string | OAIContentPart[]),
@@ -743,6 +535,10 @@ function convertMessagesForClaude(messages: OAIMessage[]): AnthropicMessage[] {
 
   return result;
 }
+
+// ---------------------------------------------------------------------------
+// POST /v1/chat/completions
+// ---------------------------------------------------------------------------
 
 router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Response) => {
   const { model, messages, stream, max_tokens, tools, tool_choice } = req.body as {
@@ -754,7 +550,6 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
     tool_choice?: unknown;
   };
 
-  // Reject disabled models early
   if (model && !isModelEnabled(model)) {
     res.status(403).json({ error: { message: `Model '${model}' is disabled on this gateway`, type: "invalid_request_error", code: "model_disabled" } });
     return;
@@ -772,113 +567,66 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
     ? [...messages, { role: "user" as const, content: "继续" }]
     : messages;
 
-  const MAX_FRIEND_RETRIES = 3;
-  const triedFriendUrls = new Set<string>();
-  let backend = pickBackend();
-  if (!backend) { res.status(503).json({ error: { message: "No available backends — all sub-nodes are down and local fallback is disabled", type: "service_unavailable" } }); return; }
+  req.log.info({ model: selectedModel, sillyTavern: isClaudeModel && getSillyTavernMode(), toolCount: tools?.length ?? 0 }, "Proxy request");
 
-  for (let attempt = 0; ; attempt++) {
-    const backendLabel = backend.kind === "local" ? "local" : backend.label;
-    req.log.info({ model: selectedModel, backend: backendLabel, attempt, counter: requestCounter - 1, sillyTavern: isClaudeModel && getSillyTavernMode(), toolCount: tools?.length ?? 0 }, "Proxy request");
+  try {
+    let result: { promptTokens: number; completionTokens: number; ttftMs?: number };
 
-    try {
-      let result: { promptTokens: number; completionTokens: number; ttftMs?: number };
-      if (backend.kind === "friend") {
-        triedFriendUrls.add(backend.url);
-        result = await handleFriendProxy({ req, res, backend, model: selectedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime });
-      } else if (isClaudeModel) {
-        const thinkingVisible = selectedModel.endsWith("-thinking-visible");
-        const thinkingEnabled = thinkingVisible || selectedModel.endsWith("-thinking");
-        const actualModel = thinkingVisible
-          ? selectedModel.replace(/-thinking-visible$/, "")
-          : thinkingEnabled
-            ? selectedModel.replace(/-thinking$/, "")
-            : selectedModel;
-        const CLAUDE_MODEL_MAX: Record<string, number> = {
-          "claude-haiku-4-5": 8096,
-          "claude-sonnet-4-5": 64000,
-          "claude-sonnet-4-6": 64000,
-          "claude-opus-4-1": 64000,
-          "claude-opus-4-5": 64000,
-          "claude-opus-4-6": 64000,
-        };
-        const modelMax = CLAUDE_MODEL_MAX[actualModel] ?? 32000;
-        const defaultMaxTokens = thinkingEnabled ? Math.max(modelMax, 32000) : modelMax;
-        const client = makeLocalAnthropic();
-        result = await handleClaude({ req, res, client, model: actualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens ?? defaultMaxTokens, thinking: thinkingEnabled, tools, toolChoice: tool_choice, startTime });
-      } else if (isGeminiModel) {
-        const thinkingVisible = selectedModel.endsWith("-thinking-visible");
-        const thinkingEnabled = thinkingVisible || selectedModel.endsWith("-thinking");
-        const actualModel = thinkingVisible
-          ? selectedModel.replace(/-thinking-visible$/, "")
-          : thinkingEnabled
-            ? selectedModel.replace(/-thinking$/, "")
-            : selectedModel;
-        result = await handleGemini({ req, res, model: actualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, thinking: thinkingEnabled, startTime });
-      } else if (isOpenRouterModel) {
-        const client = makeLocalOpenRouter();
-        result = await handleOpenAI({ req, res, client, model: selectedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime });
-      } else {
-        const client = makeLocalOpenAI();
-        result = await handleOpenAI({ req, res, client, model: selectedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime });
-      }
-      // ✅ Success — record stats, mark friend healthy, and exit retry loop
-      if (backend.kind === "friend") setHealth(backend.url, true);
-      const duration = Date.now() - startTime;
-      recordCallStat(backendLabel, duration, result.promptTokens, result.completionTokens, result.ttftMs, selectedModel);
-      pushRequestLog({
-        method: req.method, path: req.path, model: selectedModel,
-        backend: backendLabel, status: 200, duration, stream: shouldStream,
-        promptTokens: result.promptTokens, completionTokens: result.completionTokens,
-        level: "info",
-      });
-      break;
-    } catch (err: unknown) {
-      // ❌ Failure — record error, decide whether to retry on a different node
-      recordErrorStat(backendLabel);
+    if (isClaudeModel) {
+      const thinkingVisible = selectedModel.endsWith("-thinking-visible");
+      const thinkingEnabled = thinkingVisible || selectedModel.endsWith("-thinking");
+      const actualModel = thinkingVisible
+        ? selectedModel.replace(/-thinking-visible$/, "")
+        : thinkingEnabled
+          ? selectedModel.replace(/-thinking$/, "")
+          : selectedModel;
+      const CLAUDE_MODEL_MAX: Record<string, number> = {
+        "claude-haiku-4-5": 8096,
+        "claude-sonnet-4-5": 64000,
+        "claude-sonnet-4-6": 64000,
+        "claude-opus-4-1": 64000,
+        "claude-opus-4-5": 64000,
+        "claude-opus-4-6": 64000,
+      };
+      const modelMax = CLAUDE_MODEL_MAX[actualModel] ?? 32000;
+      const defaultMaxTokens = thinkingEnabled ? Math.max(modelMax, 32000) : modelMax;
+      const client = makeLocalAnthropic();
+      result = await handleClaude({ req, res, client, model: actualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens ?? defaultMaxTokens, thinking: thinkingEnabled, tools, toolChoice: tool_choice, startTime });
+    } else if (isGeminiModel) {
+      const thinkingVisible = selectedModel.endsWith("-thinking-visible");
+      const thinkingEnabled = thinkingVisible || selectedModel.endsWith("-thinking");
+      const actualModel = thinkingVisible
+        ? selectedModel.replace(/-thinking-visible$/, "")
+        : thinkingEnabled
+          ? selectedModel.replace(/-thinking$/, "")
+          : selectedModel;
+      result = await handleGemini({ req, res, model: actualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, thinking: thinkingEnabled, startTime });
+    } else if (isOpenRouterModel) {
+      const client = makeLocalOpenRouter();
+      result = await handleOpenAI({ req, res, client, model: selectedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime });
+    } else {
+      const client = makeLocalOpenAI();
+      result = await handleOpenAI({ req, res, client, model: selectedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime });
+    }
 
-      const is5xx = err instanceof FriendProxyHttpError && err.status >= 500;
-      const errMsg = err instanceof Error ? err.message : "";
-      const isNetworkErr = err instanceof TypeError
-        || ["fetch", "aborted", "terminated", "closed", "upstream", "ECONNRESET", "socket hang up", "UND_ERR"]
-          .some((kw) => errMsg.includes(kw));
-
-      if (backend.kind === "friend" && (is5xx || isNetworkErr)) {
-        setHealth(backend.url, false);
-        req.log.warn({ url: backend.url, attempt, is5xx, isNetworkErr }, "Friend backend marked unhealthy, considering retry");
-
-        if (attempt < MAX_FRIEND_RETRIES && !res.headersSent) {
-          const next = pickBackendExcluding(triedFriendUrls);
-          if (next?.kind === "friend") {
-            backend = next;
-            continue; // retry with next friend node
-          }
-        }
-      }
-
-      req.log.error({ err }, "Proxy request failed");
-      const errStatus = (err instanceof FriendProxyHttpError ? err.status : undefined) ?? 500;
-      pushRequestLog({
-        method: req.method, path: req.path, model: selectedModel,
-        backend: backendLabel, status: errStatus, duration: Date.now() - startTime,
-        stream: shouldStream, level: errStatus >= 500 ? "error" : "warn",
-        error: errMsg || "Unknown error",
-      });
-      if (!res.headersSent) {
-        res.status(500).json({ error: { message: errMsg || "Unknown error", type: "server_error" } });
-      } else if (!res.writableEnded) {
-        writeAndFlush(res, `data: ${JSON.stringify({ error: { message: errMsg || "Unknown error" } })}\n\n`);
-        writeAndFlush(res, "data: [DONE]\n\n");
-        res.end();
-      }
-      break;
+    const duration = Date.now() - startTime;
+    recordCallStat("local", duration, result.promptTokens, result.completionTokens, result.ttftMs, selectedModel);
+  } catch (err: unknown) {
+    recordErrorStat("local");
+    const errMsg = err instanceof Error ? err.message : "";
+    req.log.error({ err }, "Proxy request failed");
+    if (!res.headersSent) {
+      res.status(500).json({ error: { message: errMsg || "Unknown error", type: "server_error" } });
+    } else if (!res.writableEnded) {
+      writeAndFlush(res, `data: ${JSON.stringify({ error: { message: errMsg || "Unknown error" } })}\n\n`);
+      writeAndFlush(res, "data: [DONE]\n\n");
+      res.end();
     }
   }
 });
 
 // ---------------------------------------------------------------------------
-// Anthropic-native /v1/messages endpoint
-// Accepts Anthropic API format directly (for clients like Cherry Studio, Claude.ai compatible tools)
+// POST /v1/messages — Anthropic-native endpoint
 // ---------------------------------------------------------------------------
 
 router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) => {
@@ -921,7 +669,6 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
         const claudeStream = client.messages.stream(createParams as Parameters<typeof client.messages.stream>[0]);
 
         for await (const event of claudeStream) {
-          // Delay SSE header commit until upstream connection confirmed
           if (!keepalive) {
             setSseHeaders(res);
             keepalive = setInterval(() => { if (!res.writableEnded) writeAndFlush(res, ": keepalive\n\n"); }, 20_000);
@@ -938,11 +685,6 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
         res.end();
         const dur = Date.now() - startTime;
         recordCallStat("local", dur, inputTokens, outputTokens, undefined, selectedModel);
-        pushRequestLog({
-          method: req.method, path: req.path, model: selectedModel,
-          backend: "local", status: 200, duration: dur, stream: true,
-          promptTokens: inputTokens, completionTokens: outputTokens, level: "info",
-        });
       } finally {
         if (keepalive) clearInterval(keepalive);
       }
@@ -951,22 +693,12 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
       const usage = (result as { usage?: { input_tokens?: number; output_tokens?: number } }).usage ?? {};
       const dur = Date.now() - startTime;
       recordCallStat("local", dur, usage.input_tokens ?? 0, usage.output_tokens ?? 0, undefined, selectedModel);
-      pushRequestLog({
-        method: req.method, path: req.path, model: selectedModel,
-        backend: "local", status: 200, duration: dur, stream: false,
-        promptTokens: usage.input_tokens ?? 0, completionTokens: usage.output_tokens ?? 0, level: "info",
-      });
       res.json(result);
     }
   } catch (err: unknown) {
     recordErrorStat("local");
     const errMsg = err instanceof Error ? err.message : "Unknown error";
     req.log.error({ err }, "/v1/messages request failed");
-    pushRequestLog({
-      method: req.method, path: req.path, model: selectedModel,
-      backend: "local", status: 500, duration: Date.now() - startTime,
-      stream: shouldStream, level: "error", error: errMsg,
-    });
     if (!res.headersSent) {
       res.status(500).json({ error: { type: "server_error", message: errMsg } });
     } else {
@@ -977,67 +709,13 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
 });
 
 // ---------------------------------------------------------------------------
-// Real-time request log ring buffer + SSE
+// Stats + Admin
 // ---------------------------------------------------------------------------
 
-interface RequestLog {
-  id: number;
-  time: string;
-  method: string;
-  path: string;
-  model?: string;
-  backend?: string;
-  status: number;
-  duration: number;
-  stream: boolean;
-  promptTokens?: number;
-  completionTokens?: number;
-  level: "info" | "warn" | "error";
-  error?: string;
-}
-
-const REQUEST_LOG_MAX = 200;
-const requestLogs: RequestLog[] = [];
-let logIdCounter = 0;
-const logSSEClients: Set<Response> = new Set();
-
-export function pushRequestLog(entry: Omit<RequestLog, "id" | "time">): void {
-  const log: RequestLog = { id: ++logIdCounter, time: new Date().toISOString(), ...entry };
-  requestLogs.push(log);
-  if (requestLogs.length > REQUEST_LOG_MAX) requestLogs.shift();
-  const data = `data: ${JSON.stringify(log)}\n\n`;
-  for (const client of logSSEClients) {
-    try { client.write(data); } catch { logSSEClients.delete(client); }
-  }
-}
-
-router.get("/v1/admin/logs", requireApiKey, (_req: Request, res: Response) => {
-  res.json({ logs: requestLogs });
-});
-
-router.get("/v1/admin/logs/stream", requireApiKeyWithQuery, (req: Request, res: Response) => {
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache",
-    Connection: "keep-alive",
-    "X-Accel-Buffering": "no",
-  });
-  res.write(": connected\n\n");
-  logSSEClients.add(res);
-  const heartbeat = setInterval(() => {
-    if (!res.writableEnded) res.write(": heartbeat\n\n");
-  }, 20000);
-  req.on("close", () => { clearInterval(heartbeat); logSSEClients.delete(res); });
-});
-
 router.get("/v1/stats", requireApiKey, (_req: Request, res: Response) => {
-  const allConfigs = getAllFriendProxyConfigs();
-  const allLabels = ["local", ...allConfigs.map((c) => c.label)];
-  const result: Record<string, unknown> = {};
-  for (const label of allLabels) {
-    const s = getStat(label);
-    const cfg = allConfigs.find((c) => c.label === label);
-    result[label] = {
+  const s = getStat("local");
+  const result: Record<string, unknown> = {
+    local: {
       calls: s.calls,
       errors: s.errors,
       streamingCalls: s.streamingCalls,
@@ -1046,14 +724,10 @@ router.get("/v1/stats", requireApiKey, (_req: Request, res: Response) => {
       totalTokens: s.promptTokens + s.completionTokens,
       avgDurationMs: s.calls > 0 ? Math.round(s.totalDurationMs / s.calls) : 0,
       avgTtftMs: s.streamingCalls > 0 ? Math.round(s.totalTtftMs / s.streamingCalls) : null,
-      health: label === "local" ? "healthy" : getCachedHealth(cfg?.url ?? "") === false ? "down" : "healthy",
-      url: label === "local" ? null : cfg?.url ?? null,
-      dynamic: dynamicBackends.some((d) => d.label === label),
-      enabled: cfg ? cfg.enabled : true,
-    };
-  }
+    },
+  };
   const modelStats: Record<string, ModelStat> = Object.fromEntries(modelStatsMap.entries());
-  res.json({ stats: result, modelStats, uptimeSeconds: Math.round(process.uptime()), routing: routingSettings });
+  res.json({ stats: result, modelStats, uptimeSeconds: Math.round(process.uptime()) });
 });
 
 router.post("/v1/admin/stats/reset", requireApiKey, (_req: Request, res: Response) => {
@@ -1063,99 +737,6 @@ router.post("/v1/admin/stats/reset", requireApiKey, (_req: Request, res: Respons
   res.json({ ok: true });
 });
 
-// ---------------------------------------------------------------------------
-// Admin: manage dynamic backends at runtime (no restart / redeploy required)
-// ---------------------------------------------------------------------------
-
-router.get("/v1/admin/backends", requireApiKey, (_req: Request, res: Response) => {
-  const apiKey = process.env.PROXY_API_KEY ?? "";
-  const envConfigs = (() => {
-    const list: { label: string; url: string }[] = [];
-    const envKeys = ["FRIEND_PROXY_URL", ...Array.from({ length: 19 }, (_, i) => `FRIEND_PROXY_URL_${i + 2}`)];
-    for (const key of envKeys) { const url = process.env[key]; if (url) list.push({ label: key.replace("FRIEND_PROXY_URL", "FRIEND"), url }); }
-    return list;
-  })();
-  res.json({
-    local: { url: null, source: "local" },
-    env: envConfigs.map((c) => ({ ...c, source: "env", health: getCachedHealth(c.url) === false ? "down" : "healthy" })),
-    dynamic: dynamicBackends.map((d) => ({ ...d, source: "dynamic", health: getCachedHealth(d.url) === false ? "down" : "healthy" })),
-    apiKey,
-  });
-});
-
-router.post("/v1/admin/backends", requireApiKey, (req: Request, res: Response) => {
-  const { url } = req.body as { url?: string };
-  if (!url || typeof url !== "string" || !url.startsWith("http")) {
-    res.status(400).json({ error: "Valid https URL required" });
-    return;
-  }
-  const cleanUrl = url.replace(/\/+$/, "");
-  const normalizedUrl = normalizeSubNodeUrl(cleanUrl);
-  const allUrls = getFriendProxyConfigs().map((c) => c.url);
-  if (allUrls.includes(normalizedUrl)) { res.status(409).json({ error: "URL already in pool" }); return; }
-  const label = `DYNAMIC_${dynamicBackends.length + 1}`;
-  dynamicBackends.push({ label, url: cleanUrl });
-  saveDynamicBackends(dynamicBackends);
-  const apiKey = process.env.PROXY_API_KEY ?? "";
-  probeHealth(normalizedUrl, apiKey).then((ok) => setHealth(normalizedUrl, ok)).catch(() => setHealth(normalizedUrl, false));
-  res.json({ label, url: cleanUrl, source: "dynamic" });
-});
-
-router.delete("/v1/admin/backends/:label", requireApiKey, (req: Request, res: Response) => {
-  const { label } = req.params;
-  const before = dynamicBackends.length;
-  dynamicBackends = dynamicBackends.filter((d) => d.label !== label);
-  if (dynamicBackends.length === before) { res.status(404).json({ error: "Dynamic backend not found" }); return; }
-  saveDynamicBackends(dynamicBackends);
-  res.json({ deleted: true, label });
-});
-
-// PATCH /v1/admin/backends/:label — 切换单个节点启用/禁用
-router.patch("/v1/admin/backends/:label", requireApiKey, (req: Request, res: Response) => {
-  const { label } = req.params;
-  const { enabled } = req.body as { enabled?: boolean };
-  if (typeof enabled !== "boolean") { res.status(400).json({ error: "enabled (boolean) required" }); return; }
-  const target = dynamicBackends.find((d) => d.label === label);
-  if (!target) { res.status(404).json({ error: "Dynamic backend not found" }); return; }
-  target.enabled = enabled;
-  saveDynamicBackends(dynamicBackends);
-  res.json({ label, enabled });
-});
-
-// PATCH /v1/admin/backends — 批量切换（labels 数组 + enabled 布尔值）
-router.patch("/v1/admin/backends", requireApiKey, (req: Request, res: Response) => {
-  const { labels, enabled } = req.body as { labels?: string[]; enabled?: boolean };
-  if (!Array.isArray(labels) || typeof enabled !== "boolean") {
-    res.status(400).json({ error: "labels (string[]) and enabled (boolean) required" });
-    return;
-  }
-  const set = new Set(labels);
-  let updated = 0;
-  for (const d of dynamicBackends) {
-    if (set.has(d.label)) { d.enabled = enabled; updated++; }
-  }
-  saveDynamicBackends(dynamicBackends);
-  res.json({ updated, enabled });
-});
-
-router.get("/v1/admin/routing", requireApiKey, (_req: Request, res: Response) => {
-  res.json(routingSettings);
-});
-
-router.patch("/v1/admin/routing", requireApiKey, (req: Request, res: Response) => {
-  const { localEnabled, localFallback, fakeStream } = req.body as Partial<RoutingSettings>;
-  if (typeof localEnabled === "boolean") routingSettings.localEnabled = localEnabled;
-  if (typeof localFallback === "boolean") routingSettings.localFallback = localFallback;
-  if (typeof fakeStream === "boolean") routingSettings.fakeStream = fakeStream;
-  saveRoutingSettings();
-  res.json(routingSettings);
-});
-
-// ---------------------------------------------------------------------------
-// Admin: model enable/disable management
-// ---------------------------------------------------------------------------
-
-// GET /v1/admin/models — list all models with provider + enabled status
 router.get("/v1/admin/models", requireApiKey, (_req: Request, res: Response) => {
   const models = ALL_MODELS.map((m) => ({
     id: m.id,
@@ -1171,8 +752,6 @@ router.get("/v1/admin/models", requireApiKey, (_req: Request, res: Response) => 
   res.json({ models, summary });
 });
 
-// PATCH /v1/admin/models — bulk enable/disable by ids or by provider
-// Body: { ids?: string[], provider?: string, enabled: boolean }
 router.patch("/v1/admin/models", requireApiKey, (req: Request, res: Response) => {
   const { ids, provider, enabled } = req.body as { ids?: string[]; provider?: string; enabled?: boolean };
   if (typeof enabled !== "boolean") { res.status(400).json({ error: "enabled (boolean) required" }); return; }
@@ -1198,170 +777,6 @@ router.patch("/v1/admin/models", requireApiKey, (req: Request, res: Response) =>
 // Handlers
 // ---------------------------------------------------------------------------
 
-// Distinguishes upstream HTTP errors (5xx) from network/timeout errors so the
-// retry logic can make the right decision about whether to try another node.
-class FriendProxyHttpError extends Error {
-  constructor(public status: number, message: string) {
-    super(message);
-    this.name = "FriendProxyHttpError";
-  }
-}
-
-// handleFriendProxy — raw fetch (bypasses SDK SSE parsing) so chunk.usage is
-// captured reliably regardless of the friend proxy's SDK version or chunk format.
-// SSE headers are committed only after the first chunk arrives, which preserves
-// the retry window in case the upstream connection fails immediately.
-async function handleFriendProxy({
-  req, res, backend, model, messages, stream, maxTokens, tools, toolChoice, startTime,
-}: {
-  req: Request;
-  res: Response;
-  backend: Extract<Backend, { kind: "friend" }>;
-  model: string;
-  messages: OAIMessage[];
-  stream: boolean;
-  maxTokens?: number;
-  tools?: OAITool[];
-  toolChoice?: unknown;
-  startTime: number;
-}): Promise<{ promptTokens: number; completionTokens: number; ttftMs?: number }> {
-  const body: Record<string, unknown> = { model, messages, stream };
-  body["max_tokens"] = maxTokens ?? 16000; // always override sub-node's potentially low default
-  if (stream) body["stream_options"] = { include_usage: true };
-  if (tools?.length) body["tools"] = tools;
-  if (toolChoice !== undefined) body["tool_choice"] = toolChoice;
-
-  // ── Non-streaming (or fake-stream when client wants stream but we call non-stream) ──
-  if (!stream) {
-    const fetchRes = await fetch(`${backend.url}/v1/chat/completions`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${backend.apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120_000),
-    });
-    if (!fetchRes.ok) {
-      const errText = await fetchRes.text().catch(() => "unknown");
-      throw new FriendProxyHttpError(fetchRes.status, `Friend proxy error ${fetchRes.status}: ${errText}`);
-    }
-    const json = await fetchRes.json() as Record<string, unknown>;
-    res.json(json);
-    const usage = json["usage"] as { prompt_tokens?: number; completion_tokens?: number } | null | undefined;
-    if ((usage?.prompt_tokens ?? 0) === 0) {
-      const inputChars = messages.reduce((acc, m) => {
-        if (typeof m.content === "string") return acc + m.content.length;
-        if (Array.isArray(m.content))
-          return acc + (m.content as Array<{ type: string; text?: string }>)
-            .filter((p) => p.type === "text").reduce((a, p) => a + (p.text?.length ?? 0), 0);
-        return acc;
-      }, 0);
-      const outputChars = (json["choices"] as Array<{ message?: { content?: string } }>)?.[0]?.message?.content?.length ?? 0;
-      return { promptTokens: Math.ceil(inputChars / 4), completionTokens: Math.ceil(outputChars / 4) };
-    }
-    return { promptTokens: usage?.prompt_tokens ?? 0, completionTokens: usage?.completion_tokens ?? 0 };
-  }
-
-  // ── Streaming ────────────────────────────────────────────────────────────
-  const fetchRes = await fetch(`${backend.url}/v1/chat/completions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${backend.apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(600_000),
-  });
-
-  if (!fetchRes.ok) {
-    const errText = await fetchRes.text().catch(() => "unknown");
-    throw new FriendProxyHttpError(fetchRes.status, `Friend proxy error ${fetchRes.status}: ${errText}`);
-  }
-
-  const contentType = fetchRes.headers.get("content-type") ?? "";
-  if (contentType.includes("application/json") && routingSettings.fakeStream) {
-    req.log.info("Friend returned JSON for stream request — fake-streaming");
-    const json = await fetchRes.json() as Record<string, unknown>;
-    const result = await fakeStreamResponse(res, json, startTime);
-    if (result.promptTokens === 0) {
-      const inputChars = messages.reduce((acc, m) => {
-        if (typeof m.content === "string") return acc + m.content.length;
-        if (Array.isArray(m.content))
-          return acc + (m.content as Array<{ type: string; text?: string }>)
-            .filter((p) => p.type === "text").reduce((a, p) => a + (p.text?.length ?? 0), 0);
-        return acc;
-      }, 0);
-      const outputContent = ((json["choices"] as Array<{ message?: { content?: string } }>)?.[0]?.message?.content ?? "").length;
-      return { promptTokens: Math.ceil(inputChars / 4), completionTokens: Math.ceil(outputContent / 4), ttftMs: result.ttftMs };
-    }
-    return result;
-  }
-
-  setSseHeaders(res);
-  const keepaliveTimer = setInterval(() => writeAndFlush(res, ": keep-alive\n\n"), 15_000);
-
-  let promptTokens = 0;
-  let completionTokens = 0;
-  let ttftMs: number | undefined;
-  let outputChars = 0;
-
-  try {
-
-    const reader = fetchRes.body!.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split("\n");
-        buf = lines.pop() ?? "";
-
-        for (const line of lines) {
-          const trimmed = line.trimEnd();
-          if (!trimmed.startsWith("data:")) continue;
-          const data = trimmed.slice(5).trim();
-          if (data === "[DONE]") { writeAndFlush(res, "data: [DONE]\n\n"); continue; }
-          try {
-            const chunk = JSON.parse(data) as Record<string, unknown>;
-            // Capture usage from any chunk that carries it
-            const usage = chunk["usage"] as { prompt_tokens?: number; completion_tokens?: number } | null | undefined;
-            if (usage && typeof usage === "object") {
-              promptTokens = usage.prompt_tokens ?? promptTokens;
-              completionTokens = usage.completion_tokens ?? completionTokens;
-            }
-            // Record TTFT + accumulate output chars for fallback estimation
-            const deltaContent = (chunk["choices"] as Array<{ delta?: { content?: string } }>)?.[0]?.delta?.content;
-            if (deltaContent) {
-              if (ttftMs === undefined) ttftMs = Date.now() - startTime;
-              outputChars += deltaContent.length;
-            }
-            writeAndFlush(res, `data: ${JSON.stringify(chunk)}\n\n`);
-          } catch { /* skip malformed chunk */ }
-        }
-      }
-    } finally {
-      reader.releaseLock();
-    }
-  } finally {
-    clearInterval(keepaliveTimer);
-  }
-
-  res.end();
-
-  // Fallback: estimate tokens from char count when sub-node didn't return usage
-  if (promptTokens === 0) {
-    const inputChars = messages.reduce((acc, m) => {
-      if (typeof m.content === "string") return acc + m.content.length;
-      if (Array.isArray(m.content))
-        return acc + (m.content as Array<{ type: string; text?: string }>)
-          .filter((p) => p.type === "text").reduce((a, p) => a + (p.text?.length ?? 0), 0);
-      return acc;
-    }, 0);
-    promptTokens = Math.ceil(inputChars / 4);
-    completionTokens = Math.ceil(outputChars / 4);
-  }
-
-  return { promptTokens, completionTokens, ttftMs };
-}
-
 async function handleOpenAI({
   req, res, client, model, messages, stream, maxTokens, tools, toolChoice, startTime,
 }: {
@@ -1381,16 +796,15 @@ async function handleOpenAI({
     messages: messages as Parameters<typeof client.chat.completions.create>[0]["messages"],
     stream,
   };
-  if (maxTokens) (params as Record<string, unknown>)["max_completion_tokens"] = maxTokens;
-  if (tools?.length) (params as Record<string, unknown>)["tools"] = tools;
-  if (toolChoice !== undefined) (params as Record<string, unknown>)["tool_choice"] = toolChoice;
+  if (maxTokens) (params as unknown as Record<string, unknown>)["max_completion_tokens"] = maxTokens;
+  if (tools?.length) (params as unknown as Record<string, unknown>)["tools"] = tools;
+  if (toolChoice !== undefined) (params as unknown as Record<string, unknown>)["tool_choice"] = toolChoice;
 
   if (stream) {
     try {
       let ttftMs: number | undefined;
       let promptTokens = 0;
       let completionTokens = 0;
-      // Delay SSE header commit until upstream connection succeeds — preserves retry window
       const streamResult = await client.chat.completions.create({
         ...params,
         stream: true,
@@ -1411,7 +825,7 @@ async function handleOpenAI({
       res.end();
       return { promptTokens, completionTokens, ttftMs };
     } catch (streamErr) {
-      if (res.headersSent || !routingSettings.fakeStream) throw streamErr;
+      if (res.headersSent) throw streamErr;
       req.log.warn({ err: streamErr }, "Real streaming failed, falling back to fake-stream");
       const result = await client.chat.completions.create({ ...params, stream: false });
       return fakeStreamResponse(res, result as unknown as Record<string, unknown>, startTime);
@@ -1477,7 +891,6 @@ async function handleGemini({
       const chatId = `chatcmpl-${Date.now()}`;
       const created = Math.floor(Date.now() / 1000);
 
-      // Delay SSE header commit until upstream connection succeeds
       const response = await client.models.generateContentStream({
         model,
         contents,
@@ -1515,7 +928,7 @@ async function handleGemini({
       res.end();
       return { promptTokens, completionTokens, ttftMs };
     } catch (streamErr) {
-      if (res.headersSent || !routingSettings.fakeStream) throw streamErr;
+      if (res.headersSent) throw streamErr;
       req.log.warn({ err: streamErr }, "Gemini streaming failed, falling back to fake-stream");
       const response = await client.models.generateContent({
         model, contents,
@@ -1583,22 +996,18 @@ async function handleClaude({
 }): Promise<{ promptTokens: number; completionTokens: number; ttftMs?: number }> {
   const THINKING_BUDGET = 16000;
 
-  // Extract system prompt
   const systemMessages = messages
     .filter((m) => m.role === "system")
     .map((m) => (typeof m.content === "string" ? m.content : (m.content as OAIContentPart[]).map((p) => (p.type === "text" ? (p as { type: "text"; text: string }).text : "")).join("")))
     .join("\n");
 
-  // Convert all messages including tool_calls / tool roles
   const chatMessages = convertMessagesForClaude(messages);
 
   const thinkingParam = thinking
     ? { thinking: { type: "enabled" as const, budget_tokens: THINKING_BUDGET } }
     : {};
 
-  // Convert tools to Anthropic format
   const anthropicTools = tools?.length ? convertToolsForClaude(tools) : undefined;
-  // Convert tool_choice
   let anthropicToolChoice: unknown;
   if (toolChoice !== undefined && anthropicTools?.length) {
     if (toolChoice === "auto") anthropicToolChoice = { type: "auto" };
@@ -1644,7 +1053,6 @@ async function handleClaude({
 
       for await (const event of claudeStream) {
         if (event.type === "message_start") {
-          // Delay SSE header commit until upstream connection confirmed
           if (!headersCommitted) {
             setSseHeaders(res);
             keepalive = setInterval(() => { if (!res.writableEnded) writeAndFlush(res, ": keepalive\n\n"); }, 20_000);
@@ -1702,11 +1110,9 @@ async function handleClaude({
     }
 
   } else {
-    // Non-streaming — some models (e.g. claude-opus-4) require streaming;
-    // detect the error and transparently upgrade to stream + collect.
     let result: Anthropic.Message;
     try {
-      result = await client.messages.create(buildCreateParams() as Parameters<typeof client.messages.create>[0]);
+      result = await client.messages.create(buildCreateParams() as Parameters<typeof client.messages.create>[0]) as Anthropic.Message;
     } catch (nonStreamErr: unknown) {
       const errMsg = nonStreamErr instanceof Error ? nonStreamErr.message : String(nonStreamErr);
       if (/streaming.*required|requires.*stream/i.test(errMsg)) {
